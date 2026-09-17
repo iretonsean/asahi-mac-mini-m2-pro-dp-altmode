@@ -84,11 +84,10 @@ case "$(g -t s "$XBAR" compatible)" in *apple,t6020-display-crossbar*) ;; *) ech
 
 # ---- phandles ----
 maxph=$(grep -oE 'phandle = <0x[0-9a-f]+>' "$W/base.dts" | grep -oE '0x[0-9a-f]+' | python3 -c 'import sys;print(max(int(x,16) for x in sys.stdin.read().split()))')
-newph() { maxph=$((maxph+1)); printf '%d' "$maxph"; }
 DCP_PH=$((16#$(ph "$DCP"))); PHY_PH=$((16#$(ph "$PHY")))
 DISPEXT0_DART_PH=$((16#$(ph "$DISPEXT0_DART"))); DISPEXT1_DART_PH=$((16#$(ph "$DISPEXT1_DART")))
-if have "$XBAR" phandle; then XBAR_PH=$((16#$(ph "$XBAR"))); else XBAR_PH=$(newph); p -t u "$XBAR" phandle "$XBAR_PH"; fi
-ATC2_COMMON=$(for f in /proc/device-tree/soc/power-management@*/power-controller@*/label; do [ "$(tr -d '\0' <"$f")" = atc2_common ] && { d=${f%/label}; echo "${d#/proc/device-tree}"; }; done)
+if have "$XBAR" phandle; then XBAR_PH=$((16#$(ph "$XBAR"))); else maxph=$((maxph+1)); XBAR_PH=$maxph; p -t u "$XBAR" phandle "$XBAR_PH"; fi
+ATC2_COMMON=$(for f in /proc/device-tree/soc/power-management@*/power-controller@*/label; do [ "$(tr -d '\0' <"$f")" = atc2_common ] && { d=${f%/label}; echo "${d#/proc/device-tree}"; }; done; true)
 [ -n "$ATC2_COMMON" ] || { echo "FATAL: atc2_common power controller not found" >&2; exit 1; }
 
 # ---- the delta (mirrors t600x-j375.dtsi's ENABLE_DCPEXT_TYPEC block, atcphy1 -> atcphy2) ----
@@ -126,7 +125,7 @@ if [ "$NOFW" = 0 ]; then
     size=$(( (size + 0x3fff) & ~0x3fff ))          # m1n1: ALIGN_UP(size, SZ_16K)
     node=$(printf '/reserved-memory/asc-firmware@%x' "$phys")
     if ! fdtget -p "$B" "$node" >/dev/null 2>&1; then
-      p -c "$node"; RPH=$(newph); p -t u "$node" phandle "$RPH"
+      p -c "$node"; maxph=$((maxph+1)); RPH=$maxph; p -t u "$node" phandle "$RPH"
       p -t s "$node" compatible apple,asc-mem
       p -t x "$node" reg $(printf '0x%x 0x%x 0x%x 0x%x' $((phys>>32)) $((phys&0xffffffff)) $((size>>32)) $((size&0xffffffff)))
       p -t x "$node" no-map 2>/dev/null || true

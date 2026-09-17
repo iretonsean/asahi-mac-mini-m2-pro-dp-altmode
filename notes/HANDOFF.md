@@ -19,7 +19,7 @@ refuses to run if such text appears in its own body).
 | `patches/0001-arm64-dts-apple-t6020-j474s-bless-USB-C-Back-Right-M.patch` | DTS re-target: dcpext1 → atcphy2 / usb-pd@3b. Unpatched fairydust aims dcpext1 at atcphy1 = the *keyboard* port (it never touches atcphy0/the boot disk — only the aim is wrong) |
 | `patches/pr622-hotplug-fix.diff` | PR #622 (closed, unmerged; applies cleanly). **Not** in the first build — second iteration if hotplug is flaky |
 | `build/config-7.1.13-running` → `linux/.config` | running config + `TYPEC_NVIDIA_ALTMODE=m`, `TYPEC_TBT_ALTMODE=m`, `LOCALVERSION=""` (`EFI_SBAT_FILE`/`QRTR_MHI` don't exist in this tree) |
-| `linux/arch/arm64/boot/Image`, `staging/usr/lib/modules/7.1.13-fairydust-dp/` | build output (see §3 for sizes) |
+| `linux/arch/arm64/boot/Image` (34,114,048 B), `staging/lib/modules/7.1.13-fairydust-dp/` (127 MB stripped, 1,864 modules), `build/initramfs-linux-fairydust.img` (24.3 MB, built rootless; file list identical to the stock initramfs) | build output — ~60 MB lands on /boot (952 MB free) |
 | `scripts/kbuild.sh` | `make` wrapper with the pinned toolchain (rustup 1.93.1, bindgen 0.73.2, `~/.local` bc/dtc) |
 | `scripts/gen-dtb.sh` + `scripts/adt-segments.py` | builds `dt/t6020-j474s-dp-usbpd3b.dtb` from the live DT + the ADT dump (replicates m1n1 v1.6.1 fixups for dcpext1) |
 | `scripts/install.sh` | `sudo`: copies kernel/initramfs/dtb/modules, adds the GRUB entry, `grub-mkconfig`. `--remove` undoes it |
@@ -104,6 +104,11 @@ kernel with the system `/etc/mkinitcpio.conf` (same hooks/modules as the stock o
   (`ls /proc/device-tree/aliases/dcpext1` exists only with the custom DTB).
 - **Partner shows DP altmode but no HPD** → cd321x HPD forwarding (`drivers/usb/typec/tipd/core.c`);
   compare with haripako's notes (break 2/3 in their README).
+
+Deliberately NOT done: `dtbs_install` into `/usr/lib/modules/<kver>/dtbs/` (Arch's packaging
+layout). The `95-m1n1-install.hook` pacman hook watches that path and `update-m1n1` globs
+`/lib/modules/*-ARCH` — our kver wouldn't match, but keeping DTBs out of there removes the
+question entirely. The DTB lives at `/boot/dtb/` only.
 
 ## 5. Known limitations / second iteration
 
