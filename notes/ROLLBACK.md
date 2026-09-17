@@ -43,6 +43,12 @@ NVRAM, or any `nvme0n1*` partition.
    Pre-existing `grub.cfg.b10-diag` and `grub.cfg.b9-loglevel4` are left alone.
 5. Never run `update-m1n1`, `asahi-fwextract`, `asahi-bless --set-boot`. Never mount/fsck/write
    anything under `/dev/nvme0n1*`.
+5b. **Never run `grub-install`** (BRIEF §12). It rewrites the EFI binary and can land on the
+   internal NVMe ESP. Only `grub-mkconfig -o /boot/grub/grub.cfg` (writes sda3 only) or a
+   direct edit of `/boot/grub/grub.cfg`. install.sh carries a header comment saying so.
+   Verified 2026-09-17: EFI var `LoaderDevicePartUUID` = <boot-partuuid>-… = PARTUUID of sda3, i.e.
+   the GRUB that booted this session is the copy on the external SSD, so editing sda3's
+   grub.cfg is what takes effect.
 6. Blessed port is port2 / phy@f03000000 only. port0 / phy@703000000 carries the root SSD.
 
 ## Recovery ladder (least → most invasive)
