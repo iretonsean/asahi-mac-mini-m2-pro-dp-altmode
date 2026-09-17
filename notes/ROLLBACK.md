@@ -1,6 +1,11 @@
 # Rollback / recovery plan (Step 0) — written BEFORE any install
 
-Machine: Mac mini M2 Pro (j474s), Asahi/Omarchy on **external USB-C SSD `sda`** (port0, USB-C Back Left).
+Machine: Mac mini M2 Pro (j474s), Asahi/Omarchy on **external USB-C SSD `sda`** on the connector
+Apple labels "USB-C Back Left" (DT `usb-pd@38`, i2c 0x38, ATC PHY `phy@703000000`).
+
+> Port identity convention (BRIEF §13): `/sys/class/typec/portN` indices follow i2c probe order and
+> are NOT stable across boots. Every script here resolves ports by i2c address / DT path via
+> `scripts/lib-typec-port.sh`. "portN" appears below only as a hint, never as a key.
 Written 2026-09-17, against linux-asahi 7.1.13.asahi3-1, m1n1 v1.6.1, uboot-asahi 2026.07.asahi2-1.
 
 ## Boot chain as it exists today (verified from live system, nothing assumed)
@@ -19,7 +24,7 @@ iBoot
                  │               cryptdevice=UUID=<luks-uuid>…:cryptroot root=/dev/mapper/cryptroot
                  │      initramfs 'encrypt' hook prompts for the LUKS passphrase, unlocks sda4
                  └─ (NEW, to be added) entry in /etc/grub.d/40_custom:
-                        devicetree /dtb/t6020-j474s-fairydust-port2.dtb   (from /boot, sda3)
+                        devicetree /dtb/t6020-j474s-dp-usbpd3b.dtb   (from /boot, sda3)
                         linux      /vmlinuz-linux-fairydust
                         initrd     /initramfs-linux-fairydust.img
 ```
@@ -33,12 +38,12 @@ NVRAM, or any `nvme0n1*` partition.
 
 1. `GRUB_DEFAULT=0` and `GRUB_TIMEOUT=5`, `GRUB_TIMEOUT_STYLE=menu` are NOT changed.
    → Every unattended boot lands on the stock kernel. The fairydust entry is only ever
-   chosen by hand from the menu (arrow keys on the Apple keyboard on port1).
+   chosen by hand from the menu (arrow keys on the Apple keyboard, i2c 0x3f "USB-C Back Left Middle").
 2. `/boot/vmlinuz-linux-asahi`, `/boot/initramfs-linux-asahi.img`, `linux-asahi` package,
    `/usr/lib/modules/7.1.13-3-1-ARCH/` are never modified or removed. Never `pacman -R linux-asahi`.
 3. New files are additive, with distinct names:
    `/boot/vmlinuz-linux-fairydust`, `/boot/initramfs-linux-fairydust.img`,
-   `/boot/dtb/t6020-j474s-fairydust-port2.dtb`, `/usr/lib/modules/<fairydust-kver>/`.
+   `/boot/dtb/t6020-j474s-dp-usbpd3b.dtb`, `/usr/lib/modules/<fairydust-kver>/`.
 4. Before `grub-mkconfig`, copy `/boot/grub/grub.cfg` → `/boot/grub/grub.cfg.pre-fairydust`.
    Pre-existing `grub.cfg.b10-diag` and `grub.cfg.b9-loglevel4` are left alone.
 5. Never run `update-m1n1`, `asahi-fwextract`, `asahi-bless --set-boot`. Never mount/fsck/write
@@ -49,7 +54,8 @@ NVRAM, or any `nvme0n1*` partition.
    Verified 2026-09-17: EFI var `LoaderDevicePartUUID` = <boot-partuuid>-… = PARTUUID of sda3, i.e.
    the GRUB that booted this session is the copy on the external SSD, so editing sda3's
    grub.cfg is what takes effect.
-6. Blessed port is port2 / phy@f03000000 only. port0 / phy@703000000 carries the root SSD.
+6. Blessed port is **`phy@f03000000` / `usb-pd@3b` (i2c 0x3b, "USB-C Back Right Middle")** only.
+   **`phy@703000000` / `usb-pd@38` (i2c 0x38, "USB-C Back Left")** carries the root SSD — never.
 
 ## Recovery ladder (least → most invasive)
 
@@ -104,7 +110,7 @@ Comfortable. Re-check with `df -h /boot` in install.sh before copying.
 
 ## Post-boot regression checks (both kernels) — see scripts/verify.sh
 
-1. Machine boots, LUKS unlocks, `/dev/sda` present on port0 (`lsblk`).
+1. Machine boots, LUKS unlocks, `/dev/sda` present behind the i2c-0x38 port (`lsblk`; verify.sh resolves the port by i2c address).
 2. `card2-HDMI-A-1` status=connected, Acer XZ270 X at 3840x2160@60 (`hyprctl monitors`).
 3. `asahi` DRM bound (`ls /sys/bus/platform/drivers/asahi/`), Hyprland composites on GPU.
-4. Apple keyboard on port1 and SSD on port0 enumerate (`lsusb`).
+4. Apple keyboard (i2c 0x3f port) and SSD (i2c 0x38 port) enumerate (`lsusb`).
