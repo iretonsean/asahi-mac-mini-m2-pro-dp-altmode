@@ -1,0 +1,5 @@
+linux/
+staging/
+build/
+*.dtb
+*.img
