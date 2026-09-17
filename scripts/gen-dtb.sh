@@ -65,6 +65,7 @@ MUX_INDEX=2                       # t602x crossbar: 2*dispextN + port -> dispext
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 B="$W/base.dtb"
 if [ -n "$LIVE" ]; then cp "$LIVE" "$B"; else dtc -q -I fs -O dtb -p 262144 -o "$B" /proc/device-tree/; fi
+dtc -q -I dtb -O dts "$B" > "$W/base.dts"
 g() { fdtget "$B" "$@"; }         # get
 p() { fdtput "$B" "$@"; }         # put
 ph() { g -t x "$1" phandle; }      # phandle of node path
@@ -73,16 +74,16 @@ have() { fdtget "$B" "$1" "$2" >/dev/null 2>&1; }
 # ---- assertions that we are wiring the intended connector ----
 lbl=$(g -t s "$CONN" label); [ "$lbl" = "USB-C Back Right Middle" ] || { echo "FATAL: $CONN label is '$lbl'" >&2; exit 1; }
 ss=$(g -t x "$CONN/ports/port@1/endpoint" remote-endpoint)
-ss_path=$(dtc -q -I dtb -O dts "$B" | awk -v want="phandle = <0x$ss>;" '
+ss_path=$(awk -v want="phandle = <0x$ss>;" '
   /^\t+[^ \t]+ \{$/ { n=split($0,a,"\t"); name=a[n]; sub(/ \{$/,"",name); depth=n-1; path[depth]=name }
-  index($0,want) { s=""; for(i=1;i<=depth;i++) s=s "/" path[i]; print s; exit }')
+  index($0,want) { s=""; for(i=1;i<=depth;i++) s=s "/" path[i]; print s; exit }' "$W/base.dts")
 case "$ss_path" in "$PHY"/*) ;; *) echo "FATAL: connector SS endpoint resolves to '$ss_path', not under $PHY" >&2; exit 1;; esac
 case "$PHY" in "$ROOTDISK_PHY") echo "FATAL: refusing to bless the root-disk PHY" >&2; exit 1;; esac
-[ "$(g -t s "$DCP" compatible | head -1)" = "apple,t6020-dcpext" ] || { echo "FATAL: $DCP compatible mismatch" >&2; exit 1; }
-[ "$(g -t s "$XBAR" compatible)" = "apple,t6020-display-crossbar" ] || { echo "FATAL: $XBAR compatible mismatch" >&2; exit 1; }
+case "$(g -t s "$DCP" compatible)" in *apple,t6020-dcpext*) ;; *) echo "FATAL: $DCP compatible mismatch" >&2; exit 1;; esac
+case "$(g -t s "$XBAR" compatible)" in *apple,t6020-display-crossbar*) ;; *) echo "FATAL: $XBAR compatible mismatch" >&2; exit 1;; esac
 
 # ---- phandles ----
-maxph=$(dtc -q -I dtb -O dts "$B" | grep -oE 'phandle = <0x[0-9a-f]+>' | grep -oE '0x[0-9a-f]+' | python3 -c 'import sys;print(max(int(x,16) for x in sys.stdin.read().split()))')
+maxph=$(grep -oE 'phandle = <0x[0-9a-f]+>' "$W/base.dts" | grep -oE '0x[0-9a-f]+' | python3 -c 'import sys;print(max(int(x,16) for x in sys.stdin.read().split()))')
 newph() { maxph=$((maxph+1)); printf '%d' "$maxph"; }
 DCP_PH=$((16#$(ph "$DCP"))); PHY_PH=$((16#$(ph "$PHY")))
 DISPEXT0_DART_PH=$((16#$(ph "$DISPEXT0_DART"))); DISPEXT1_DART_PH=$((16#$(ph "$DISPEXT1_DART")))
@@ -147,12 +148,13 @@ for prop in linux,uefi-mmap-size linux,uefi-mmap-start linux,uefi-mmap-desc-size
   fdtput -d "$B" /chosen "$prop" 2>/dev/null || true
 done
 
+# ---- round-trip guard: text normalisation must be lossless on the untouched base ----
+dtc -q -I dts -O dtb -o "$W/rt.dtb" "$W/base.dts" && dtc -q -I dtb -O dts "$W/rt.dtb" | diff -q - "$W/base.dts" >/dev/null || { echo "FATAL: dtc text round-trip of the live DT is not lossless" >&2; exit 1; }
 # ---- normalise via dtc (fixes empty props, drops padding) and emit review artefacts ----
 dtc -q -I dtb -O dts "$B" | sed -E 's/apple,always-on = \[\];/apple,always-on;/; s/no-map = \[\];/no-map;/' > "$W/out.dts"
 dtc -q -I dts -O dtb -o "$OUT" "$W/out.dts"
 dtc -q -I dtb -O dts -o "${OUT%.dtb}.dts" "$OUT"
-dtc -q -I dtb -O dts "$B" >/dev/null
-diff <(dtc -q -I fs -O dts /proc/device-tree/ 2>/dev/null || dtc -q -I dtb -O dts "$LIVE") "${OUT%.dtb}.dts" | grep -E '^[<>]' > "${OUT%.dtb}.delta.txt" || true
+diff "$W/base.dts" "${OUT%.dtb}.dts" | grep -E '^[<>]' > "${OUT%.dtb}.delta.txt" || true
 echo "wrote $OUT ($(stat -c %s "$OUT") bytes); review ${OUT%.dtb}.dts and ${OUT%.dtb}.delta.txt"
 if [ -n "$REF" ]; then
   echo "--- dcp@315c00000 in reference (fairydust source) vs generated (phandle numbers differ by design):"

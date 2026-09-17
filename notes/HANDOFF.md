@@ -16,7 +16,7 @@ refuses to run if such text appears in its own body).
 | Path | What |
 |---|---|
 | `linux/` | fairydust @ `ce9f2eba72c0` (2026-09-08, 7.1.13-based), branch `j474s-dp-usbpd3b` = fairydust + `patches/0001-*` |
-| `patches/0001-arm64-dts-apple-t6020-j474s-bless-USB-C-Back-Right-M.patch` | DTS re-target: dcpext1 → atcphy2 / usb-pd@3b (fairydust's own j474s DTB blesses atcphy1 = the *keyboard* port) |
+| `patches/0001-arm64-dts-apple-t6020-j474s-bless-USB-C-Back-Right-M.patch` | DTS re-target: dcpext1 → atcphy2 / usb-pd@3b. Unpatched fairydust aims dcpext1 at atcphy1 = the *keyboard* port (it never touches atcphy0/the boot disk — only the aim is wrong) |
 | `patches/pr622-hotplug-fix.diff` | PR #622 (closed, unmerged; applies cleanly). **Not** in the first build — second iteration if hotplug is flaky |
 | `build/config-7.1.13-running` → `linux/.config` | running config + `TYPEC_NVIDIA_ALTMODE=m`, `TYPEC_TBT_ALTMODE=m`, `LOCALVERSION=""` (`EFI_SBAT_FILE`/`QRTR_MHI` don't exist in this tree) |
 | `linux/arch/arm64/boot/Image`, `staging/usr/lib/modules/7.1.13-fairydust-dp/` | build output (see §3 for sizes) |
@@ -89,6 +89,21 @@ kernel with the system `/etc/mkinitcpio.conf` (same hooks/modules as the stock o
    `lsusb` no longer listing `2109:0103 … BILLBOARD`. USB on that port dropping to 2.0 is
    expected under DP pin assignment C (PR #289) — not a cable fault.
 5. Anything wrong → power-cycle, let the default entry boot (stock kernel, untouched).
+
+### Troubleshooting order (BRIEF §15)
+- **DP connector appears on the right port but the image is wrong/absent** → suspect
+  `mux-index` first (`dt/…dts`, `dcp@315c00000`). It is the one value that comes from driver
+  semantics, not the DTS: on t602x the crossbar state is `2*dispext + port`, so dispext1/port 0
+  = 2 (same as the Mac Studio template). If the crossbar log says `Switched dpphy to dispext1,0`
+  but nothing shows, try `mux-index = <3>` (dispext1,1) via `fdtput -t u <dtb> /soc/dcp@315c00000 mux-index 3`
+  and re-run `sudo scripts/install.sh`. This failure looks like a cable/monitor fault and isn't.
+- **`apple-dcp 315c00000.dcp` probe fails / RTKit boot timeout** → the firmware carveouts
+  (`asc-firmware@…` nodes from the ADT dump) are wrong or missing. Re-check the
+  `adt-segments.py` output against `ioreg` (`iop-dcpext1-nub` / `segment-ranges`).
+- **No DP connector at all** → `dmesg | grep -i 315c00000`; check the DTB actually loaded
+  (`ls /proc/device-tree/aliases/dcpext1` exists only with the custom DTB).
+- **Partner shows DP altmode but no HPD** → cd321x HPD forwarding (`drivers/usb/typec/tipd/core.c`);
+  compare with haripako's notes (break 2/3 in their README).
 
 ## 5. Known limitations / second iteration
 
