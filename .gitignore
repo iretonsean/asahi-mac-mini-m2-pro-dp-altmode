@@ -3,3 +3,4 @@ staging/
 build/
 *.dtb
 *.img
+__pycache__/
