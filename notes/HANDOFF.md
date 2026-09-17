@@ -26,7 +26,7 @@ refuses to run if such text appears in its own body).
 | `scripts/verify.sh` | post-boot regression + success checks, ports keyed on i2c address (BRIEF §13) |
 | `scripts/lib-typec-port.sh` | the i2c↔portN helper (peer-verified on live hardware) |
 | `notes/ROLLBACK.md` | boot chain, invariants, recovery ladder — read before the first reboot |
-| `dt/live-7.1.13.dts`, `dt/stock-t6020-j474s.dts`, `dt/base-live.dtb` | live DT (with m1n1 fixups) vs stock DTB, for reference |
+| `dt/stock-t6020-j474s.dts` (tracked), `dt/live-7.1.13.dts` + `dt/base-live.dtb` (local only — contain serial/MACs; regenerate with `dtc -I fs -O dts /proc/device-tree/`) | live DT (with m1n1 fixups) vs stock DTB, for reference |
 
 ## 1. One-time: get dcpext1's firmware carveouts from macOS (needed by gen-dtb.sh)
 
