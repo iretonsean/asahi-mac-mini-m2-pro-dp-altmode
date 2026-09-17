@@ -87,6 +87,10 @@ Root is on an **encrypted external USB-C SSD**. The bootloader is **GRUB** at `/
 
 ## 4. Port map — THE critical constraint
 
+> **⚠ See §13 before using this table.** The `portN` indices below are assigned in i2c probe
+> order and are NOT stable across boots. Use the i2c address / DT phy path as the key.
+> `scripts/lib-typec-port.sh` resolves ports correctly; use it instead of hardcoding `portN`.
+
 Resolved from `/proc/device-tree` by following connector endpoint phandles. Physical labels
 are Apple's own, from the DT `label` properties.
 
@@ -176,14 +180,16 @@ may be newer than what the fairydust tree accepts. Check the tree's
 
 ## 7. Success criteria
 
-All of these, on the monitor plugged into **port2 / USB-C Back Right Middle**:
+All of these, on the monitor plugged into the blessed port — **i2c `usb-pd@3b` / "USB-C Back
+Right Middle" / `phy@f03000000`**. Resolve it with `scripts/lib-typec-port.sh`; never
+hardcode `portN` (§13).
 
 1. `dcp@315c00000` probes — appears in `/sys/bus/platform/drivers/apple-dcp/` and logs
    an RTKit init in `dmesg`.
 2. A new connector appears: `/sys/class/drm/card*-DP-*` with `status=connected`.
 3. `typec_displayport` is loaded (`lsmod`).
-4. `/sys/class/typec/port2-partner/port2-partner.*/` gains an alt mode with `svid=ff01`
-   and `active=yes`.
+4. The blessed port gains a partner alt mode with `svid=ff01` and `active=yes`:
+   `cat "$(typec_sysfs_by_i2c 3b)"-partner/*/svid`
 5. **The billboard device is gone** — `lsusb` no longer lists `2109:0103 ... BILLBOARD`.
 6. `hyprctl monitors` lists the second display with sane modes, and it actually lights up.
 
@@ -273,3 +279,243 @@ non-negotiable rather than merely advisable.
 A bad kernel or DTB makes **the Omarchy install** fail to boot. macOS is unaffected and
 still reachable through the Apple boot picker. Recovery is: boot picker → macOS (or a USB
 installer) → fix or remove the GRUB entry on `sda3`.
+
+---
+
+## 12. CORRECTION to §11 — the boot chain starts on the INTERNAL drive
+
+Resolved 2026-09-17 without sudo, from the device tree. **This supersedes the §11 claim that
+the Omarchy install "lives entirely on the external SSD."** That is true of the root and
+`/boot`, but NOT of the boot chain.
+
+```
+/proc/device-tree/chosen/asahi,efi-system-partition
+  = <esp-partuuid>
+  -> /dev/nvme0n1p4   (vfat, LABEL "EFI - OMARC", INTERNAL NVMe)
+```
+
+So the actual boot path is:
+
+```
+iBoot            nvme0n1p1  iBootSystemContainer   INTERNAL
+  -> stub        nvme0n1p3  2.3G APFS              INTERNAL  (m1n1 + u-boot; size is classic stub)
+  -> ESP         nvme0n1p4  "EFI - OMARC"          INTERNAL  <-- CONFIRMED by DT
+  -> GRUB cfg    sda3       OMARCHY-ESP            external  (/boot)
+  -> kernel      sda3, root sda4 LUKS/btrfs        external
+```
+
+`nvme0n1p4` is **not** a leftover from an old install, as §11 guessed. It is part of the
+**live** boot chain for the running system. `nvme0n1p3` being the blessed stub is a strong
+inference (stub and ESP are paired, and 2.3G is the standard stub size), not yet confirmed —
+`sudo asahi-bless -l` would confirm it but needs a real TTY; `/dev/mtd0` is root-only and the
+user is in `wheel` but sudo has no askpass in the agent session.
+
+### Consequences — these are now hard rules, not advice
+
+1. **§11 rule 2 is load-bearing and CONFIRMED.** `update-m1n1` / `asahi-fwextract` write the
+   boot stub, and the stub is on the internal NVMe. Running either writes to the internal
+   drive and can brick the boot of the running system. Do not run them. Device-tree changes
+   go through GRUB's `devicetree` directive from `/boot` (sda3), as §11 rule 3 already says.
+
+2. **NEW: never run `grub-install`.** It rewrites the EFI binary, and the live one is on
+   `nvme0n1p4` (internal). `grub-mkconfig -o /boot/grub/grub.cfg` is fine — it writes only
+   the config, on sda3 (external). Adding the new kernel entry must be done by editing
+   `/boot/grub/grub.cfg` or via `grub-mkconfig`, never by reinstalling GRUB.
+
+3. **Never mount, fsck or write `nvme0n1p4`.** §11 rule 1 already forbade all `nvme0n1*`;
+   this is the partition where that rule most plausibly gets violated by accident, because a
+   routine-looking bootloader step targets it.
+
+4. `nvme0n1p5` (ext4 "asahi-root", 11.5G) is still presumed to be a previous internal Asahi
+   root, now superseded by the external install. Unconfirmed. Leave it alone regardless.
+
+### What is still true
+
+**macOS (`nvme0n1p2`, 446G APFS) is not touched by anything in this project.** It is not
+mounted, not referenced by fstab or grub.cfg, and there is no APFS write path on this system.
+The correction above is about the *boot chain*, not about macOS user data.
+
+**Worst case is unchanged in kind but not in reach:** a bad kernel or DTB breaks the Omarchy
+boot. Recovery is still the Apple boot picker (hold power) -> macOS or USB installer. But
+because the stub and ESP are internal, a careless `update-m1n1` or `grub-install` breaks
+boot in a way that is harder to repair from a live USB than a bad entry on sda3 would be.
+Stay on the external SSD for every write.
+
+---
+
+## 13. DEFECT in §4 — portN indices are unstable. Re-key on i2c address.
+
+Found via omacom/omarchy-mac PR #289. **§4 and §7 criterion 4 are keyed on `portN`, which is
+wrong.** Those indices are assigned in i2c probe order, not by address, and probe order can
+race. PR #289: "the same physical port was observed as `port1` on one boot and `port0` on
+the next."
+
+Our own data corroborates it — the mapping is not in address order:
+
+```
+0-0038 -> port0    0-003f -> port1    0-003b -> port2    0-003c -> port3
+```
+
+Address order (38, 3b, 3c, 3f) would give port0,1,2,3. It doesn't. Probe-order assignment
+confirmed.
+
+This is a safety defect, not a cosmetic one: §4 says "bless port2, never port0", and port0's
+ATC PHY carries the external boot SSD. If the indices swap on a boot, that sentence points at
+the wrong physical connector.
+
+### Use these stable identifiers everywhere — DTB, scripts, verification
+
+| | MONITOR — bless this | BOOT SSD — never touch |
+|---|---|---|
+| i2c node | `usb-pd@3b` (addr 0x3b) | `usb-pd@38` (addr 0x38) |
+| DT label | "USB-C Back Right Middle" | "USB-C Back Left" |
+| ATC PHY | `phy@f03000000` | `phy@703000000` |
+| USB ctrl | `usb@f02280000` | `usb@702280000` |
+| endpoints | 0x55 / 0x56 | 0x51 / 0x52 |
+
+Other two, for completeness: `usb-pd@3f` / "Back Left Middle" / `phy@b03000000` (keyboard);
+`usb-pd@3c` / "Back Right" / `phy@1303000000`.
+
+DT paths are stable. `portN` is not. Anything reading `/sys/class/typec/portN` must resolve
+the port through its i2c address first.
+
+### Two signals from PR #289 that will otherwise mislead diagnosis
+
+1. **The USB Billboard device is not proof of failure.** It reads like a failed alt mode but
+   says nothing either way. (§1 item 3 treats its disappearance as the pass signal — that
+   direction still holds, but do not read its *presence* as a specific fault.)
+2. **Losing SuperSpeed is what success looks like.** Under DP pin assignment C all four lanes
+   carry DP and USB drops to 2.0. Do not diagnose that as a bad cable or a dying port.
+
+### Read before writing more DTS
+
+- PR #289: https://github.com/omacom/omarchy-mac/pull/289 — documents the whole failure chain
+- Working implementation: https://github.com/haripako/dp-altmode — its kernel-side HPD
+  forwarding is backported from `fairydust`. May already solve problems this project is about
+  to hit. Read it rather than re-deriving.
+- Issue #384: https://github.com/omacom/omarchy-mac/issues/384 — M2 Air (t8112) report;
+  explicitly asks whether Mini/Pro/Max are tracked separately. **This machine is that missing
+  data point.**
+
+---
+
+## 14. BLOCKER for the GRUB-devicetree route — dcpext1 firmware carveouts are not in the live DT
+
+Raised by the build session, **independently verified here against the live device tree**.
+This is real and it changes the plan.
+
+### The finding
+
+m1n1's `kboot.c` (`dt_reserve_dcpext_firmware` / `dt_reserve_asc_firmware`) only processes DCP
+nodes that have a **`dcpextN` alias in the payload DTB**. For each one it reads the Apple
+Device Tree (`/arm-io/dcpextN/iop-dcpextN-nub` `segment-ranges`) and emits `/reserved-memory`
+`apple,asc-mem` nodes carrying `iommu-addresses` (phys -> DART IOVA), plus a `memory-region`
+on the DCP node. `apple-dart` needs these (`IOMMU_RESV_TRANSLATED`) to recreate the
+coprocessor's firmware mappings after it resets the DART. Without them dcpext1's firmware
+cannot execute.
+
+The stock m1n1 payload declares only `dcpext0`, so nothing for dcpext1 exists in the live DT,
+and the physical addresses of its firmware carveouts are readable nowhere from Linux.
+
+### Evidence (all from this machine)
+
+```
+/proc/device-tree/aliases/       -> dcpext0 = /soc/dcp@289c00000 .  No dcpext1 alias.
+
+dcp@289c00000 (HDMI, working)    memory-region = <0x104 0x105 0x106 0x107>
+  0x104 -> reserved-memory/asc-firmware@10000230000   (apple,asc-mem, has iommu-addresses)
+  0x105 -> reserved-memory/asc-firmware@103e4448000   (apple,asc-mem)
+  0x106 -> reserved-memory/asc-firmware@103e3448000   (apple,asc-mem)
+  0x107 -> reserved-memory/framebuffer@103e4a48000
+
+dcp@315c00000 (target)           NO memory-region, NO apple,firmware-compat,
+                                 NO apple,firmware-version
+```
+
+Property diff between the working HDMI node and the target is exactly the set m1n1
+synthesizes plus the board wiring. The two remaining `asc-firmware` nodes (0x108, 0x109)
+belong to other coprocessors, not to DCP.
+
+ADT is confirmed not exposed to Linux: `/sys/firmware/fdt` is the flattened **Linux** DT, and
+nothing under `/proc/device-tree` carries `segment-ranges`.
+
+### The two routes
+
+**Route A — derive from a macOS ADT dump (chosen; complies with §11/§12).**
+Boot macOS once and run, as a normal user:
+```
+ioreg -l -w0 -p IODeviceTree -a > adt.plist
+```
+Read-only, writes nothing, touches no Linux partition. Copy the plist to Linux.
+`scripts/gen-dtb.py` then takes that plus the live `/proc/device-tree` and emits the final
+DTB, replicating m1n1's fixups for dcpext1.
+
+⚠ **While in macOS, do not let it install any system update.** `asahi,os-fw-version` is
+currently 13.5 and the Asahi install is paired to that firmware. A macOS update changes the
+paired firmware and is a much bigger problem than this project. Decline update prompts.
+
+**Route B — add a `dcpext1` alias to the m1n1 payload DTS and `update-m1n1`.**
+This is what fairydust does upstream. It **writes `nvme0n1p4` on the internal NVMe** and is
+forbidden by §11 rule 2 and §12 rule 1. Documented for completeness only. Do not take this
+route without the user explicitly lifting that constraint.
+
+### Open question, unverified
+
+Whether a custom m1n1 can be **chainloaded** from external media instead of flashed to
+`nvme0n1p4` — which would get Route B's correctness without Route B's write. Nobody has
+checked this. Worth ten minutes before committing to the gen-dtb.py path, not worth blocking on.
+
+---
+
+## 15. Stock fairydust blesses the WRONG port on this machine
+
+Raised by the build session, verified here. **Anyone who packs unmodified fairydust DTBs on a
+j474s gets DP on the keyboard port and nothing on the monitor.**
+
+`t602x-j474-j475.dtsi` includes `t600x-j375.dtsi` (Mac Studio), whose `ENABLE_DCPEXT_TYPEC`
+block is active because `j474s.dts` defines that macro. The compiled stock DTS contains:
+
+```
+&dcpext1 { status="okay"; apple,connector-type="DP"; apple,dptx-phy=<1>;
+           phys=<&atcphy1 6>; mux-controls=<&atcphy1_xbar 0>; mux-index=<2>; };
+&atcphy1_xbar { status="okay"; };
+&ps_atc1_common { apple,always-on; };
+```
+
+Alias resolution on this machine, confirmed from the live DT:
+
+| alias | phy node | connector | attached |
+|---|---|---|---|
+| `atcphy0` | `phy@703000000` | `usb-pd@38` Back Left | **ROOT SSD** |
+| `atcphy1` | `phy@b03000000` | `usb-pd@3f` Back Left Middle | keyboard ← **stock blesses this** |
+| `atcphy2` | `phy@f03000000` | `usb-pd@3b` Back Right Middle | **MONITOR** ← should be blessed |
+| `atcphy3` | `phy@1303000000` | `usb-pd@3c` Back Right | pd-only |
+
+**Not catastrophic** — verified that stock fairydust never touches `atcphy0`/`ps_atc0`: those
+appear only in base node definitions, with no `status` override, no `always-on`, no DP wiring.
+The boot disk is not at risk from the stock DTB. It is simply aimed at the wrong connector.
+
+### The re-target
+
+`patches/0001-…bless-USB-C-Back-Right-M.patch`, branch `j474s-dp-usbpd3b`: moves `dcpext1` to
+`apple,dptx-phy=<2>` / `phys=<&atcphy2 PHY_TYPE_DP>` / `mux-controls=<&atcphy2_xbar 0>`,
+enables `atcphy2_xbar` and disables `atcphy1_xbar`, swaps `apple,always-on` from
+`ps_atc1_common` to `ps_atc2_common`, and moves `displayport` from `typec1` to `typec2`.
+`scripts/gen-dtb.sh` applies the same delta to the live-DT-derived DTB for the GRUB route, and
+asserts the connector's SS endpoint resolves under `phy@f03000000` and never `phy@703000000`.
+
+`dpaudio2` correctly needs no change: verified that `dpaudio2_dcp` is an endpoint inside
+`dcpext1`'s own `ports/port@0`, so DP audio binds to the DCP, not to the PHY.
+
+### Highest-risk unverified assumption in the patch
+
+`mux-index` is left at `2` on the reasoning that the t602x crossbar encodes it as
+`2 * dispext + port`, so dispext1/port0 stays 2 regardless of which ATC PHY feeds it. That is
+driver semantics and cannot be confirmed from the DTS. If DP comes up on the right connector
+but the image is wrong or absent, **suspect `mux-index` first.**
+
+### Chainload idea (§14) — ruled out
+
+m1n1's `chainload_load` reads only from NVMe (it has no USB stack), and both chainload specs
+live on `nvme0n1p3`/`p4`. A custom m1n1 cannot be booted from the external SSD. Route A
+(macOS ADT dump) stands as the only path that respects §11/§12.
