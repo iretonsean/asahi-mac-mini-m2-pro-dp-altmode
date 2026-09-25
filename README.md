@@ -11,12 +11,13 @@ PHYs DisplayPort alt mode would repurpose, so the whole project is organised aro
 bricking it. Read [`BRIEF.md`](BRIEF.md) (the full problem statement, diagnosis and safety
 rules) and [`notes/ROLLBACK.md`](notes/ROLLBACK.md) before doing anything.
 
-## Status (2026-09-17)
+## Status (2026-09-25)
 
-Built, not yet booted. Kernel `7.1.13-fairydust-dp` (fairydust `ce9f2eba72c0` + one DTS patch)
-builds rootless with a pinned toolchain; install/verify tooling is ready. Remaining:
-a one-time `ioreg` dump from macOS (see [`notes/HANDOFF.md`](notes/HANDOFF.md) §1 — and do
-**not** let macOS update while there), then `sudo scripts/install.sh`, reboot, `scripts/verify.sh`.
+Built, not yet booted. Kernel `7.1.13-fairydust-dp` = fairydust `ce9f2eba72c0` + a DTS patch +
+an EFI-stub patch that enables dcpext1 on top of the device tree m1n1 builds each boot, with the
+firmware carveouts read from the Apple Device Tree m1n1 leaves in RAM. No macOS boot is needed.
+Remaining: `sudo scripts/install.sh`, reboot, pick the fairydust entry, `scripts/verify.sh`
+(see [`notes/HANDOFF.md`](notes/HANDOFF.md)).
 
 ## Things worth knowing even if you have different hardware
 
@@ -27,11 +28,16 @@ a one-time `ioreg` dump from macOS (see [`notes/HANDOFF.md`](notes/HANDOFF.md) �
   [`patches/0001-…`](patches/) re-targets it to `atcphy2` / usb-pd@3b.
 * **`/sys/class/typec/portN` indices are probe-order and not stable across boots.** Key
   everything on the i2c address / DT path instead (`scripts/lib-typec-port.sh`).
-* **Loading a custom DTB through GRUB's `devicetree` bypasses m1n1's runtime fixups.** For a
-  newly enabled DCP that means the firmware carveout / DART mappings (`apple,asc-mem` +
-  `iommu-addresses`) are missing and the coprocessor cannot start. m1n1 derives them from
-  the Apple Device Tree (`iop-dcpextN-nub/segment-ranges`), which Linux cannot see, so
-  `scripts/gen-dtb.sh` replicates m1n1 v1.6.1's logic from an `ioreg` dump.
+* **Don't load a DTB snapshotted from the live tree through GRUB's `devicetree`.** m1n1's
+  fixups include per-boot values (secondary-CPU `cpu-release-addr`, the ADT's location) that
+  change from boot to boot. A newly enabled DCP also needs firmware carveout / DART mappings
+  (`apple,asc-mem` + `iommu-addresses`) that m1n1 derives from the Apple Device Tree
+  (`iop-dcpextN-nub/segment-ranges`) only for aliased nodes.
+  [`patches/0002-*`](patches/) does that in the kernel's EFI stub instead. It reads the ADT
+  from the `phram` "adt" region m1n1 leaves in RAM and checks its parser against m1n1's own
+  dcpext0 output on every boot.
+* **Don't name an extra kernel `/boot/vmlinuz-*` on an Arch GRUB setup** unless you want it to
+  become the default: `grub-mkconfig` version-sorts those, and `linux-fairydust` > `linux-asahi`.
 * On t602x the display crossbar `mux-index` is `2 * dispext + port`.
 
 ## Layout
@@ -41,11 +47,14 @@ a one-time `ioreg` dump from macOS (see [`notes/HANDOFF.md`](notes/HANDOFF.md) �
 | `BRIEF.md` | problem statement, diagnosis, port map, safety rules (§11–§15) |
 | `notes/ROLLBACK.md` | boot chain, invariants, recovery ladder |
 | `notes/HANDOFF.md` | step-by-step runbook + troubleshooting |
-| `patches/0001-*.patch` | the DTS re-target (apply on `fairydust`) |
+| `patches/0001-*.patch` | the DTS re-target (apply on `fairydust`; only matters for an m1n1-packed DTB) |
+| `patches/0002-*.patch` | EFI-stub dcpext1 fixup — what the GRUB entry actually relies on |
+| `tests/stub-fixup/` | rootless userspace tests of the stub fixup against the live FDT |
 | `patches/pr622-hotplug-fix.diff` | AsahiLinux/linux#622, held for a second iteration |
 | `scripts/kbuild.sh` | build wrapper (rustup 1.93.1, bindgen 0.73.2, user-local `bc`/`dtc`) |
-| `scripts/gen-dtb.sh`, `scripts/adt-segments.py` | live DT + ADT dump → GRUB-loadable DTB |
-| `scripts/install.sh` | additive GRUB entry; `--remove` undoes it; never `grub-install`/`update-m1n1` |
+| `scripts/gen-dtb.sh`, `scripts/adt-segments.py` | legacy DTB generator, now only the tests' oracle — don't boot its output |
+| `scripts/install.sh` | additive GRUB entry; `--remove` undoes it; `--print-entry` previews; never `grub-install`/`update-m1n1` |
+| `scripts/stage.sh` | restage modules + rootless initramfs after any rebuild |
 | `scripts/verify.sh` | post-boot regression + success checks |
 | `dt/stock-t6020-j474s.dts` | decompiled stock DTB for reference |
 

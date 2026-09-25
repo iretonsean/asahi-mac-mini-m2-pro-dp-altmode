@@ -24,15 +24,21 @@ iBoot
                  │               cryptdevice=UUID=<luks-uuid>…:cryptroot root=/dev/mapper/cryptroot
                  │      initramfs 'encrypt' hook prompts for the LUKS passphrase, unlocks sda4
                  └─ (NEW, to be added) entry in /etc/grub.d/40_custom:
-                        devicetree /dtb/t6020-j474s-dp-usbpd3b.dtb   (from /boot, sda3)
-                        linux      /vmlinuz-linux-fairydust
-                        initrd     /initramfs-linux-fairydust.img
+                        linux      /fairydust/vmlinuz  <stock cmdline> apple_dcpext1=usb-pd@3b
+                        initrd     /fairydust/initramfs.img
+                        (no `devicetree` line — see below)
 ```
 
-m1n1 passes its embedded stock DTB (after runtime fixups) to u-boot → GRUB. The new entry
-replaces that DTB via GRUB's `devicetree` command **for that entry only**. Entry 0 keeps
-seeing the stock DTB. Nothing in this project modifies m1n1, u-boot, the stage-2 payload,
-NVRAM, or any `nvme0n1*` partition.
+m1n1 passes its embedded stock DTB (after runtime fixups) to u-boot → GRUB → kernel, for
+BOTH entries. In the new entry the fairydust kernel's EFI stub (patches/0002-*) adds the
+dcpext1 → usb-pd@3b delta to that tree in memory, for that boot only, and only because the
+cmdline carries `apple_dcpext1=usb-pd@3b`. Entry 0's kernel has no such code. Nothing in this
+project modifies m1n1, u-boot, the stage-2 payload, NVRAM, or any `nvme0n1*` partition.
+
+Why not GRUB `devicetree` (the original plan): the live DT carries per-boot m1n1 values —
+secondary-CPU `cpu-release-addr` (spin table) and the ADT / m1n1-log `phram` regions moved
+by 0x18f0000 between the 2026-09-17 boot and the 2026-09-25 boot. A DTB snapshotted on one
+boot would point the next boot's secondary CPUs at a stale spin table.
 
 ## Invariants that make rollback trivial
 
@@ -42,8 +48,11 @@ NVRAM, or any `nvme0n1*` partition.
 2. `/boot/vmlinuz-linux-asahi`, `/boot/initramfs-linux-asahi.img`, `linux-asahi` package,
    `/usr/lib/modules/7.1.13-3-1-ARCH/` are never modified or removed. Never `pacman -R linux-asahi`.
 3. New files are additive, with distinct names:
-   `/boot/vmlinuz-linux-fairydust`, `/boot/initramfs-linux-fairydust.img`,
-   `/boot/dtb/t6020-j474s-dp-usbpd3b.dtb`, `/usr/lib/modules/<fairydust-kver>/`.
+   `/boot/fairydust/vmlinuz`, `/boot/fairydust/initramfs.img`, `/usr/lib/modules/7.1.13-fairydust-dp/`.
+   Deliberately NOT `/boot/vmlinuz-*`: grub-mkconfig's 10_linux globs that and makes the
+   version_sort-highest kernel the top-level default — `vmlinuz-linux-fairydust` sorts above
+   `vmlinuz-linux-asahi`. install.sh also checks after grub-mkconfig that entry 0's `linux`
+   line is `/vmlinuz-linux-asahi`, not just that its title is "Arch Linux".
 4. Before `grub-mkconfig`, copy `/boot/grub/grub.cfg` → `/boot/grub/grub.cfg.pre-fairydust`.
    Pre-existing `grub.cfg.b10-diag` and `grub.cfg.b9-loglevel4` are left alone.
 5. Never run `update-m1n1`, `asahi-fwextract`, `asahi-bless --set-boot`. Never mount/fsck/write
@@ -62,7 +71,7 @@ NVRAM, or any `nvme0n1*` partition.
 **A. Fairydust kernel hangs / panics / no display.**
    Hold the power button ~10 s to power off. Power on. Do nothing at the GRUB menu:
    after 5 s entry 0 (stock) boots. Enter LUKS passphrase. Done. Then remove or fix the
-   custom entry at leisure (`sudo rm /boot/dtb/... ; edit /etc/grub.d/40_custom ; sudo grub-mkconfig -o /boot/grub/grub.cfg`).
+   custom entry at leisure (`sudo scripts/install.sh --remove`).
 
 **B. Fairydust kernel boots but GPU/HDMI/USB regressed.**
    Same as A — reboot into entry 0. Nothing persistent was changed by booting the new kernel.
@@ -104,7 +113,8 @@ Comfortable. Re-check with `df -h /boot` in install.sh before copying.
 - [ ] sha256 of /boot/vmlinuz-linux-asahi and /boot/initramfs-linux-asahi.img unchanged
 - [ ] `grep -c menuentry /boot/grub/grub.cfg` increased by exactly the new entries; entry 0 is still 'Arch Linux' with vmlinuz-linux-asahi
 - [ ] /boot/grub/grub.cfg.pre-fairydust exists
-- [ ] new entry has `devicetree`, `linux`, `initrd` lines pointing at existing files on /boot
+- [ ] new entry has `linux` (with `apple_dcpext1=usb-pd@3b`) and `initrd` lines pointing at existing files under /boot/fairydust (review first, rootless: `scripts/install.sh --print-entry`)
+- [ ] entry 0's `linux` line is `/vmlinuz-linux-asahi` (install.sh checks this after grub-mkconfig)
 - [ ] `df -h /boot` still shows > 800 MiB free
 - [ ] no command in install.sh references nvme0n1 or update-m1n1 (grep it)
 
