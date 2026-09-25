@@ -1,5 +1,11 @@
 #!/usr/bin/env bash
-# gen-dtb.sh — build the device tree for the fairydust GRUB entry.
+# gen-dtb.sh — LEGACY / TEST ORACLE ONLY. DO NOT BOOT ITS OUTPUT (see notes/HANDOFF.md, 2026-09-25):
+# the live DT it starts from carries per-boot m1n1 values (secondary-CPU cpu-release-addr, ADT and
+# m1n1-log phram regions) that differ on the next boot. The fairydust entry now gets dcpext1 from
+# the kernel's EFI stub (patches/0002-*) on top of the tree m1n1 builds each boot; this script is
+# kept because tests/stub-fixup/run-tests.sh checks the stub's result against it.
+#
+# Original description: build the device tree for the fairydust GRUB entry.
 #
 # Output: t6020-j474s-dp-usbpd3b.dtb — the LIVE device tree of this machine (which already
 # carries every runtime fixup m1n1 applied at boot: memory, reserved-memory, MAC addresses,

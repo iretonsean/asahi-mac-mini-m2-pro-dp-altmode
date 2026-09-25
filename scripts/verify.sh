@@ -15,7 +15,8 @@ check() { local d="$1"; shift; if "$@" >/dev/null 2>&1; then ok "$d"; else bad "
 port_of_sysdev() { # print i2c addr of the USB-C port whose xhci hosts sysfs device $1
   local rp; rp=$(readlink -f "$1"); for a in "${!USBCTRL[@]}"; do case "$rp" in *"/${USBCTRL[$a]}.usb/"*) echo "$a"; return;; esac; done; echo "?"; }
 
-echo "== kernel: $(uname -r)   DTB fairydust delta present: $([ -e /proc/device-tree/aliases/dcpext1 ] && echo yes || echo no)"
+stub=$(tr -d '\0' 2>/dev/null < /proc/device-tree/chosen/asahi-dp-altmode,dcpext1 || echo "not run (option absent or stock kernel)")
+echo "== kernel: $(uname -r)   dcpext1 alias: $([ -e /proc/device-tree/aliases/dcpext1 ] && echo yes || echo no)   EFI-stub fixup: $stub"
 echo "== regression checks (must pass on every kernel)"
 rootdev=$(findmnt -no SOURCE / ); bootdisk=$(lsblk -no PKNAME "$(findmnt -no SOURCE /boot)" 2>/dev/null)
 check "root mounted from LUKS mapper ($rootdev)" sh -c 'case "$0" in /dev/mapper/cryptroot*) exit 0;; esac; exit 1' "$rootdev"
@@ -28,10 +29,13 @@ check "render node present" test -e /dev/dri/renderD128
 check "Apple keyboard enumerated" sh -c 'lsusb | grep -qi "apple.*keyboard\|05ac:"'
 kbd=$(for d in /sys/bus/usb/devices/*; do grep -qs '^05ac$' "$d/idVendor" && echo "$d"; done | head -1)
 [ -n "$kbd" ] && { p=$(port_of_sysdev "$kbd"); check "keyboard on i2c-0x$KBD_I2C port [seen: 0x$p]" test "$p" = "$KBD_I2C"; }
+ncpu_dt=$(ls -d /proc/device-tree/cpus/cpu@* 2>/dev/null | wc -l)
+check "all $ncpu_dt CPUs from the DT are online ($(nproc --all) online)" test "$(nproc --all)" = "$ncpu_dt"
 check "HDMI uses dedicated dptx phy (not an ATC PHY)" test "$(od -An -tx4 --endian=big /proc/device-tree/soc/dcp@289c00000/phys | tr -d ' ')" = "$(od -An -tx4 --endian=big /proc/device-tree/soc/phy@39c000000/phandle | tr -d ' ')"
 if command -v hyprctl >/dev/null && [ -n "${HYPRLAND_INSTANCE_SIGNATURE:-}" ]; then info "hyprctl monitors:"; hyprctl monitors 2>/dev/null | grep -E '^Monitor|^\s+[0-9]+x[0-9]+@' | sed 's/^/        /'; fi
 
 echo "== DP alt-mode success criteria (BRIEF §7) on i2c-0x$DP_I2C '$(typec_label_by_i2c $DP_I2C)'"
+case "$stub" in applied*) ok "0. EFI-stub fixup applied ($stub)";; "not run"*) info "0. EFI-stub fixup did not run — expected on the stock entry only";; *) bad "0. EFI-stub fixup refused: $stub";; esac
 check "1. dcp@315c00000 bound to apple-dcp" test -e /sys/bus/platform/drivers/apple-dcp/315c00000.dcp
 dpc=$(ls -d /sys/class/drm/card*-DP-* 2>/dev/null | head -1)
 check "2. a DP connector exists ($dpc)" test -n "$dpc"
