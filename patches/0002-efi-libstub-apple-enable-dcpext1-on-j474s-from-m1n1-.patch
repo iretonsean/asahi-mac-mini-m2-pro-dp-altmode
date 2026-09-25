@@ -1,0 +1,580 @@
+From 93323cbec508e8006dcd143cdcb46ec41841ab3a Mon Sep 17 00:00:00 2001
+From: Sean Ireton <1441621+iretonsean@users.noreply.github.com>
+Date: Fri, 25 Sep 2026 21:21:31 +0000
+Subject: [PATCH] efi/libstub: apple: enable dcpext1 on j474s from m1n1's ADT
+
+Replicate m1n1 v1.6.1's dt_reserve_dcpext_firmware()/dt_set_dcp_firmware()
+for dcpext1 in the arm64 EFI stub, on top of the FDT m1n1 built for this
+boot, and wire dcp@315c00000 to atcphy2 / usb-pd@3b ("USB-C Back Right
+Middle") as t600x-j375.dtsi's ENABLE_DCPEXT_TYPEC block does for atcphy1.
+
+The firmware carveouts are read from the Apple Device Tree m1n1 leaves in
+RAM (/reserved-memory phram "adt"). The parser is validated every boot
+against the carveouts m1n1 itself emitted for dcpext0; any mismatch, an
+unexpected base tree, or a connector not routed to phy@f03000000 leaves the
+FDT untouched. Opt-in via "apple_dcpext1=usb-pd@3b" on apple,j474s only;
+the outcome is recorded in /chosen/asahi-dp-altmode,dcpext1.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/firmware/efi/libstub/Makefile       |   1 +
+ drivers/firmware/efi/libstub/apple-dcpext.c | 502 ++++++++++++++++++++
+ drivers/firmware/efi/libstub/efistub.h      |   6 +
+ drivers/firmware/efi/libstub/fdt.c          |   3 +
+ 4 files changed, 512 insertions(+)
+ create mode 100644 drivers/firmware/efi/libstub/apple-dcpext.c
+
+diff --git a/drivers/firmware/efi/libstub/Makefile b/drivers/firmware/efi/libstub/Makefile
+index cfedb3025..33c48238d 100644
+--- a/drivers/firmware/efi/libstub/Makefile
++++ b/drivers/firmware/efi/libstub/Makefile
+@@ -83,6 +83,7 @@ lib-$(CONFIG_EFI_GENERIC_STUB)	+= efi-stub.o string.o intrinsics.o systable.o \
+ 
+ lib-$(CONFIG_ARM)		+= arm32-stub.o
+ lib-$(CONFIG_ARM64)		+= kaslr.o arm64.o arm64-stub.o smbios.o
++lib-$(CONFIG_ARCH_APPLE)	+= apple-dcpext.o
+ lib-$(CONFIG_X86)		+= x86-stub.o smbios.o
+ lib-$(CONFIG_X86_64)		+= x86-5lvl.o
+ lib-$(CONFIG_RISCV)		+= kaslr.o riscv.o riscv-stub.o
+diff --git a/drivers/firmware/efi/libstub/apple-dcpext.c b/drivers/firmware/efi/libstub/apple-dcpext.c
+new file mode 100644
+index 000000000..8e3858577
+--- /dev/null
++++ b/drivers/firmware/efi/libstub/apple-dcpext.c
+@@ -0,0 +1,502 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Enable dcpext1 (dcp@315c00000) on the Mac mini M2 Pro (j474s) for DP alt
++ * mode on the USB-C port Apple labels "USB-C Back Right Middle" (usb-pd@3b,
++ * atcphy2 = phy@f03000000), on top of the FDT that m1n1 handed to u-boot.
++ *
++ * Normally this is done by m1n1: with a dcpextN alias in its payload DTB it
++ * reserves the coprocessor's firmware carveouts (dt_reserve_dcpext_firmware)
++ * and sets apple,firmware-{version,compat}. This machine's m1n1 payload
++ * lives on the internal NVMe and is not to be modified, so the kernel's EFI
++ * stub replicates m1n1 v1.6.1's logic for dcpext1 instead, every boot:
++ *
++ *  - carveouts come from the Apple Device Tree that m1n1 leaves in RAM
++ *    (/reserved-memory phram node labelled "adt"), node
++ *    /arm-io/dcpext1/iop-dcpext1-nub, property segment-ranges;
++ *  - the parser is checked against the carveouts m1n1 itself emitted for
++ *    dcpext0 in this same FDT; any mismatch leaves the FDT untouched;
++ *  - the board wiring mirrors t600x-j375.dtsi's ENABLE_DCPEXT_TYPEC block
++ *    with atcphy1 replaced by atcphy2.
++ *
++ * Opt-in only: nothing happens unless the command line contains
++ * "apple_dcpext1=usb-pd@3b" and the machine is apple,j474s. The outcome is
++ * recorded in /chosen/asahi-dp-altmode,dcpext1 for inspection from Linux.
++ * All validation happens before the first write, so a failure leaves the
++ * FDT as m1n1 made it (plus that one /chosen property).
++ */
++
++#ifdef APPLE_DCPEXT_USERSPACE_TEST
++#include "apple-dcpext-test-shim.h"
++#else
++#include <linux/efi.h>
++#include <linux/libfdt.h>
++#include <linux/sizes.h>
++#include <asm/efi.h>
++
++#include "efistub.h"
++
++#define APPLE_DCPEXT_PHYS_TO_PTR(pa)	((const u8 *)(unsigned long)(pa))
++#endif
++
++#define CMDLINE_OPT	"apple_dcpext1=usb-pd@3b"
++#define STATUS_PROP	"asahi-dp-altmode,dcpext1"
++
++#define ADT_MAX_SIZE	SZ_8M
++#define ADT_MAX_DEPTH	8
++#define ADT_NAME_LEN	32
++#define ADT_PROP_HDR	(ADT_NAME_LEN + 4)
++#define ADT_SIZE_MASK	0x7fffffffU	/* bit 31: template flag (proxyclient adt.py) */
++#define SEG_SIZE	32		/* struct adt_segment_ranges, packed */
++#define MAX_SEGS	8
++
++#define PHY_TYPE_DP	6	/* include/dt-bindings/phy/phy.h */
++#define DPTX_PHY_INDEX	2	/* atcphy2 */
++#define MUX_INDEX	2	/* t602x crossbar: 2 * dispext + port -> dispext1, port 0 */
++
++/* No pointer tables here: arm64 stub objects must not carry absolute relocs. */
++static const char DCP[] = "/soc/dcp@315c00000";
++static const char DCP0[] = "/soc/dcp@289c00000";
++static const char PHY[] = "/soc/phy@f03000000";
++static const char ROOTDISK_PHY[] = "/soc/phy@703000000";
++static const char XBAR[] = "/soc/mux@f0304c000";
++static const char DISPEXT0_DART[] = "/soc/iommu@289304000";
++static const char DISPEXT1_DART[] = "/soc/iommu@315304000";
++static const char DCPEXT1_DART[] = "/soc/iommu@31530c000";
++static const char DCPEXT1_MBOX[] = "/soc/mbox@315c08000";
++static const char DPAUDIO2[] = "/soc/audio-controller@39b508000";
++static const char DISPLAY[] = "/soc/display-subsystem";
++static const char CONN[] = "/soc/i2c@39b040000/usb-pd@3b/connector";
++static const char CONN_SS_EP[] = "/soc/i2c@39b040000/usb-pd@3b/connector/ports/port@1/endpoint";
++static const char CONN_LABEL[] = "USB-C Back Right Middle";
++static const char RESV[] = "/reserved-memory";
++
++struct seg {
++	u64 phys, remap, size;	/* size already aligned up to 16K, like m1n1 */
++};
++
++/* ---- Apple Device Tree (bounds-checked; layout as in m1n1 rust/src/adt.rs) ---- */
++
++struct adt {
++	const u8 *base;
++	u32 size;
++};
++
++static u32 le32(const u8 *p)
++{
++	return p[0] | p[1] << 8 | p[2] << 16 | (u32)p[3] << 24;
++}
++
++static u64 le64(const u8 *p)
++{
++	return le32(p) | (u64)le32(p + 4) << 32;
++}
++
++/* Offset just past the properties of the node at @off (= its first child), or 0. */
++static u32 adt_props_end(const struct adt *a, u32 off)
++{
++	u32 n, p, sz;
++
++	if (off > a->size || a->size - off < 8)
++		return 0;
++	n = le32(a->base + off);
++	p = off + 8;
++	while (n--) {
++		if (a->size - p < ADT_PROP_HDR)
++			return 0;
++		sz = le32(a->base + p + ADT_NAME_LEN) & ADT_SIZE_MASK;
++		if (sz > a->size - p - ADT_PROP_HDR)
++			return 0;
++		p += ADT_PROP_HDR + ((sz + 3) & ~3U);
++		if (p > a->size)
++			return 0;
++	}
++	return p;
++}
++
++static const u8 *adt_getprop(const struct adt *a, u32 off, const char *name, u32 *len)
++{
++	u32 n, p, sz;
++	size_t l = strlen(name);
++
++	if (!adt_props_end(a, off))
++		return NULL;
++	n = le32(a->base + off);
++	p = off + 8;
++	while (n--) {
++		const char *pn = (const char *)a->base + p;
++
++		sz = le32(a->base + p + ADT_NAME_LEN) & ADT_SIZE_MASK;
++		if (l < ADT_NAME_LEN && !strncmp(pn, name, l) && pn[l] == '\0') {
++			*len = sz;
++			return a->base + p + ADT_PROP_HDR;
++		}
++		p += ADT_PROP_HDR + ((sz + 3) & ~3U);
++	}
++	return NULL;
++}
++
++/* Offset just past the whole subtree rooted at @off, or 0. */
++static u32 adt_node_end(const struct adt *a, u32 off, int depth)
++{
++	u32 c, p = adt_props_end(a, off);
++
++	if (!p || depth > ADT_MAX_DEPTH)
++		return 0;
++	c = le32(a->base + off + 4);
++	while (c--) {
++		p = adt_node_end(a, p, depth + 1);
++		if (!p)
++			return 0;
++	}
++	return p;
++}
++
++static bool adt_name_is(const struct adt *a, u32 off, const char *want)
++{
++	u32 len;
++	const u8 *v = adt_getprop(a, off, "name", &len);
++	size_t l = strlen(want);
++
++	/* m1n1 also matches "want@unit"; our names have no unit address */
++	return v && len > l && !strncmp((const char *)v, want, l) &&
++	       (v[l] == '\0' || v[l] == '@');
++}
++
++static u32 adt_subnode(const struct adt *a, u32 off, const char *name, int depth)
++{
++	u32 c, p = adt_props_end(a, off);
++
++	if (!p)
++		return 0;
++	c = le32(a->base + off + 4);
++	while (c--) {
++		if (adt_name_is(a, p, name))
++			return p;
++		p = adt_node_end(a, p, depth + 1);
++		if (!p)
++			return 0;
++	}
++	return 0;
++}
++
++/* /arm-io/<dcp>/iop-<dcp>-nub segment-ranges -> @segs; returns count, <0 on error */
++static int adt_dcp_segments(const struct adt *a, const char *dcp, const char *nub,
++			    struct seg *segs)
++{
++	u32 off, len, i;
++	const u8 *v;
++
++	off = adt_subnode(a, 0, "arm-io", 0);
++	off = off ? adt_subnode(a, off, dcp, 1) : 0;
++	off = off ? adt_subnode(a, off, nub, 2) : 0;
++	if (!off)
++		return -1;
++	v = adt_getprop(a, off, "segment-ranges", &len);
++	if (!v || !len || len % SEG_SIZE || len / SEG_SIZE > MAX_SEGS)
++		return -2;
++	for (i = 0; i < len / SEG_SIZE; i++, v += SEG_SIZE) {
++		/* u64 phys; u64 iova; u64 remap; u32 size; u32 unk; — m1n1 uses remap */
++		segs[i].phys = le64(v);
++		segs[i].remap = le64(v + 16);
++		segs[i].size = ALIGN(le32(v + 24), SZ_16K);
++		if (!segs[i].phys || !segs[i].size || segs[i].phys & (SZ_16K - 1))
++			return -3;
++	}
++	return i;
++}
++
++/* ---- FDT helpers ---- */
++
++static u64 fdt_u64_at(const fdt32_t *c)
++{
++	return (u64)fdt32_to_cpu(c[0]) << 32 | fdt32_to_cpu(c[1]);
++}
++
++static u32 phandle_of(void *fdt, const char *path)
++{
++	int off = fdt_path_offset(fdt, path);
++
++	return off < 0 ? 0 : fdt_get_phandle(fdt, off);
++}
++
++static bool compat_is(void *fdt, const char *path, const char *compat)
++{
++	int off = fdt_path_offset(fdt, path);
++
++	return off >= 0 && !fdt_node_check_compatible(fdt, off, compat);
++}
++
++static bool str_is(void *fdt, const char *path, const char *prop, const char *want)
++{
++	int off = fdt_path_offset(fdt, path), len;
++	const char *v = off < 0 ? NULL : fdt_getprop(fdt, off, prop, &len);
++
++	return v && len == strlen(want) + 1 && !strcmp(v, want);
++}
++
++static bool starts_with(const char *s, const char *prefix)
++{
++	return !strncmp(s, prefix, strlen(prefix));
++}
++
++static int set_str(void *fdt, const char *path, const char *prop, const char *val)
++{
++	int off = fdt_path_offset(fdt, path);
++
++	return off < 0 ? off : fdt_setprop_string(fdt, off, prop, val);
++}
++
++static int set_cells(void *fdt, const char *path, const char *prop, const u32 *cells, int n)
++{
++	fdt32_t buf[8];
++	int i, off = fdt_path_offset(fdt, path);
++
++	if (off < 0)
++		return off;
++	for (i = 0; i < n; i++)
++		buf[i] = cpu_to_fdt32(cells[i]);
++	return fdt_setprop(fdt, off, prop, buf, n * sizeof(fdt32_t));
++}
++
++static bool cmdline_has_opt(const char *cmdline)
++{
++	const char *p = cmdline;
++	size_t l = strlen(CMDLINE_OPT);
++
++	while (p && (p = strstr(p, CMDLINE_OPT))) {
++		if ((p == cmdline || p[-1] == ' ') && (p[l] == '\0' || p[l] == ' '))
++			return true;
++		p += l;
++	}
++	return false;
++}
++
++/* Is [pa, pa+size) disjoint from every existing /reserved-memory reg? */
++static bool resv_disjoint(void *fdt, u64 pa, u64 size)
++{
++	int resv = fdt_path_offset(fdt, RESV), node, len;
++
++	fdt_for_each_subnode(node, fdt, resv) {
++		const fdt32_t *reg = fdt_getprop(fdt, node, "reg", &len);
++
++		for (; reg && len >= 16; reg += 4, len -= 16) {
++			u64 a = fdt_u64_at(reg), s = fdt_u64_at(reg + 2);
++
++			if (pa < a + s && a < pa + size)
++				return false;
++		}
++	}
++	return true;
++}
++
++/* Does the FDT carry exactly what m1n1 would emit for @seg of the DCP with @dcp_ph? */
++static bool m1n1_emitted(void *fdt, const struct seg *seg, u32 dcp_ph, const char *dcp_path)
++{
++	char path[64];
++	int node, len, dcp, i;
++	const fdt32_t *v;
++	u32 ph;
++
++	snprintf(path, sizeof(path), "%s/asc-firmware@%llx", RESV, seg->phys);
++	node = fdt_path_offset(fdt, path);
++	if (node < 0 || fdt_node_check_compatible(fdt, node, "apple,asc-mem"))
++		return false;
++	v = fdt_getprop(fdt, node, "reg", &len);
++	if (!v || len != 16 || fdt_u64_at(v) != seg->phys || fdt_u64_at(v + 2) != seg->size)
++		return false;
++	v = fdt_getprop(fdt, node, "iommu-addresses", &len);
++	for (; v && len >= 20; v += 5, len -= 20)
++		if (fdt32_to_cpu(v[0]) == dcp_ph && fdt_u64_at(v + 1) == seg->remap &&
++		    fdt_u64_at(v + 3) == seg->size)
++			break;
++	if (!v || len < 20)
++		return false;
++	ph = fdt_get_phandle(fdt, node);
++	dcp = fdt_path_offset(fdt, dcp_path);
++	v = dcp < 0 ? NULL : fdt_getprop(fdt, dcp, "memory-region", &len);
++	for (i = 0; v && i < len / 4; i++)
++		if (fdt32_to_cpu(v[i]) == ph)
++			return true;
++	return false;
++}
++
++/* ---- the fixup ---- */
++
++static const char *dcpext1_check_and_apply(void *fdt, int *nsegs)
++{
++	struct seg s0[MAX_SEGS], s1[MAX_SEGS];
++	int n0, n1, i, off, len, err = 0;
++	u32 dcp_ph, phy_ph, xbar_ph, d0_ph, d1_ph, ph, regions[MAX_SEGS];
++	char atc2[64], path[64];
++	const fdt32_t *v;
++	struct adt a;
++	u64 adt_pa = 0, adt_sz = 0;
++
++	/* 1. the machine and the base tree are what we expect */
++	if (fdt_node_check_compatible(fdt, 0, "apple,j474s"))
++		return "skipped: not apple,j474s";
++	if (fdt_get_alias(fdt, "dcpext1"))
++		return "skipped: dcpext1 alias already present (m1n1 handled it)";
++	if (!compat_is(fdt, DCP, "apple,t6020-dcpext") || !compat_is(fdt, DCP0, "apple,t6020-dcpext") ||
++	    !compat_is(fdt, XBAR, "apple,t6020-display-crossbar"))
++		return "failed: dcp/crossbar node compatible mismatch";
++	if (!str_is(fdt, DCP, "status", "disabled"))
++		return "failed: dcp@315c00000 is not disabled in the base tree";
++	if (!str_is(fdt, CONN, "label", CONN_LABEL))
++		return "failed: usb-pd@3b connector label mismatch";
++
++	/* 2. the connector's SuperSpeed endpoint really goes to atcphy2, never the root-disk PHY */
++	off = fdt_path_offset(fdt, CONN_SS_EP);
++	v = off < 0 ? NULL : fdt_getprop(fdt, off, "remote-endpoint", &len);
++	if (!v || len != 4)
++		return "failed: connector SS endpoint missing";
++	off = fdt_node_offset_by_phandle(fdt, fdt32_to_cpu(*v));
++	if (off < 0 || fdt_get_path(fdt, off, path, sizeof(path)))
++		return "failed: connector SS endpoint unresolvable";
++	if (starts_with(path, ROOTDISK_PHY) || !starts_with(path, PHY) || path[strlen(PHY)] != '/')
++		return "failed: connector SS endpoint is not under phy@f03000000";
++
++	/* 3. phandles and the atc2_common power domain */
++	dcp_ph = phandle_of(fdt, DCP);
++	phy_ph = phandle_of(fdt, PHY);
++	d0_ph = phandle_of(fdt, DISPEXT0_DART);
++	d1_ph = phandle_of(fdt, DISPEXT1_DART);
++	xbar_ph = phandle_of(fdt, XBAR);
++	if (!dcp_ph || !phy_ph || !d0_ph || !d1_ph || !phandle_of(fdt, DCP0))
++		return "failed: missing phandle on dcp/phy/dart";
++	off = fdt_path_offset(fdt, DISPLAY);
++	v = off < 0 ? NULL : fdt_getprop(fdt, off, "iommus", &len);
++	if (!v || len != 8 || fdt32_to_cpu(v[0]) != d0_ph || v[1])
++		return "failed: display-subsystem iommus not <dispext0_dart 0>";
++	off = fdt_node_offset_by_prop_value(fdt, -1, "label", "atc2_common", sizeof("atc2_common"));
++	if (off < 0 || fdt_get_path(fdt, off, atc2, sizeof(atc2)) ||
++	    !starts_with(atc2, "/soc/power-management@") ||
++	    fdt_node_offset_by_prop_value(fdt, off, "label", "atc2_common", sizeof("atc2_common")) >= 0)
++		return "failed: atc2_common power domain not found or not unique";
++	off = fdt_path_offset(fdt, DCP0);
++	if (!fdt_getprop(fdt, off, "apple,firmware-version", &len) ||
++	    !fdt_getprop(fdt, off, "apple,firmware-compat", &len))
++		return "failed: dcp@289c00000 lacks apple,firmware-version/compat";
++
++	/* 4. the ADT m1n1 left in RAM */
++	fdt_for_each_subnode(off, fdt, fdt_path_offset(fdt, RESV)) {
++		v = fdt_getprop(fdt, off, "label", &len);
++		if (v && len == sizeof("adt") && !strcmp((const char *)v, "adt") &&
++		    !fdt_node_check_compatible(fdt, off, "phram")) {
++			v = fdt_getprop(fdt, off, "reg", &len);
++			if (v && len == 16) {
++				adt_pa = fdt_u64_at(v);
++				adt_sz = fdt_u64_at(v + 2);
++			}
++			break;
++		}
++	}
++	if (!adt_pa || adt_sz < 8 || adt_sz > ADT_MAX_SIZE)
++		return "failed: no usable /reserved-memory phram 'adt' region";
++	a.base = APPLE_DCPEXT_PHYS_TO_PTR(adt_pa);
++	a.size = adt_sz;
++	if (!a.base || !adt_node_end(&a, 0, 0))
++		return "failed: ADT does not parse";
++
++	/* 5. parser self-test: dcpext0 must reproduce what m1n1 emitted in this very FDT */
++	n0 = adt_dcp_segments(&a, "dcpext0", "iop-dcpext0-nub", s0);
++	if (n0 < 1)
++		return "failed: ADT has no dcpext0 segment-ranges";
++	for (i = 0; i < n0; i++)
++		if (!m1n1_emitted(fdt, &s0[i], phandle_of(fdt, DCP0), DCP0))
++			return "failed: ADT dcpext0 segments disagree with m1n1's reserved-memory";
++
++	/* 6. dcpext1 segments: sane and not overlapping anything already reserved */
++	n1 = adt_dcp_segments(&a, "dcpext1", "iop-dcpext1-nub", s1);
++	if (n1 < 1)
++		return "failed: ADT has no dcpext1 segment-ranges";
++	for (i = 0; i < n1; i++) {
++		if (!resv_disjoint(fdt, s1[i].phys, s1[i].size))
++			return "failed: a dcpext1 segment overlaps an existing reservation";
++		if (!s1[i].remap)
++			return "failed: dcpext1 segment without remap iova";
++	}
++
++	/* ---- writes (only NOSPACE can fail from here on; the buffer is 2 MiB) ---- */
++	if (!xbar_ph) {
++		err |= fdt_generate_phandle(fdt, &xbar_ph);
++		err |= set_cells(fdt, XBAR, "phandle", &xbar_ph, 1);
++	}
++	for (i = 0; i < n1 && !err; i++) {
++		u32 reg[4] = { s1[i].phys >> 32, (u32)s1[i].phys, s1[i].size >> 32, (u32)s1[i].size };
++		u32 iommu[5] = { dcp_ph, s1[i].remap >> 32, (u32)s1[i].remap,
++				 s1[i].size >> 32, (u32)s1[i].size };
++
++		snprintf(path, sizeof(path), "asc-firmware@%llx", s1[i].phys);
++		off = fdt_add_subnode(fdt, fdt_path_offset(fdt, RESV), path);
++		if (off < 0) {
++			err = off;
++			break;
++		}
++		snprintf(path, sizeof(path), "%s/asc-firmware@%llx", RESV, s1[i].phys);
++		err |= fdt_generate_phandle(fdt, &ph);
++		err |= set_cells(fdt, path, "phandle", &ph, 1);
++		err |= set_str(fdt, path, "compatible", "apple,asc-mem");
++		err |= set_cells(fdt, path, "reg", reg, 4);
++		err |= fdt_setprop_empty(fdt, fdt_path_offset(fdt, path), "no-map");
++		err |= set_cells(fdt, path, "iommu-addresses", iommu, 5);
++		regions[i] = ph;
++	}
++	if (!err) {
++		u32 iommus[4] = { d0_ph, 0, d1_ph, 0 };
++		u32 phys[2] = { phy_ph, PHY_TYPE_DP };
++		u32 mux[2] = { xbar_ph, 0 };
++		u32 dptx = DPTX_PHY_INDEX, muxi = MUX_INDEX;
++		const void *fv;
++
++		err |= set_str(fdt, DISPEXT1_DART, "status", "okay");
++		err |= set_str(fdt, DCPEXT1_DART, "status", "okay");
++		err |= set_str(fdt, DCPEXT1_MBOX, "status", "okay");
++		err |= set_str(fdt, XBAR, "status", "okay");
++		err |= set_str(fdt, DPAUDIO2, "status", "okay");
++		err |= set_cells(fdt, DISPLAY, "iommus", iommus, 4);
++		err |= set_str(fdt, DCP, "apple,connector-type", "DP");
++		err |= set_cells(fdt, DCP, "apple,dptx-phy", &dptx, 1);
++		err |= set_cells(fdt, DCP, "phys", phys, 2);
++		err |= set_str(fdt, DCP, "phy-names", "dp-phy");
++		err |= set_cells(fdt, DCP, "mux-controls", mux, 2);
++		err |= set_str(fdt, DCP, "mux-control-names", "dp-xbar");
++		err |= set_cells(fdt, DCP, "mux-index", &muxi, 1);
++		err |= set_cells(fdt, DCP, "memory-region", regions, n1);
++		/* same OS firmware as dcpext0, so the same version/compat m1n1 computed for it */
++		fv = fdt_getprop(fdt, fdt_path_offset(fdt, DCP0), "apple,firmware-version", &len);
++		err |= fv ? fdt_setprop(fdt, fdt_path_offset(fdt, DCP), "apple,firmware-version", fv, len) : -1;
++		fv = fdt_getprop(fdt, fdt_path_offset(fdt, DCP0), "apple,firmware-compat", &len);
++		err |= fv ? fdt_setprop(fdt, fdt_path_offset(fdt, DCP), "apple,firmware-compat", fv, len) : -1;
++		err |= set_cells(fdt, CONN, "displayport", &dcp_ph, 1);
++		err |= fdt_setprop_empty(fdt, fdt_path_offset(fdt, atc2), "apple,always-on");
++		err |= set_str(fdt, "/aliases", "dcpext1", DCP);
++		err |= set_str(fdt, DCP, "status", "okay");
++	}
++	if (err)
++		return "FAILED MID-WRITE: FDT partially modified";
++	*nsegs = n1;
++	return NULL;
++}
++
++void efi_apple_dcpext1_fixup(void *fdt, const char *cmdline)
++{
++	const char *why;
++	char msg[96];
++	int n = 0, chosen;
++
++	if (!cmdline || !cmdline_has_opt(cmdline))
++		return;
++
++	why = dcpext1_check_and_apply(fdt, &n);
++	if (why) {
++		efi_err("apple-dcpext1: %s\n", why);
++		snprintf(msg, sizeof(msg), "%s", why);
++	} else {
++		efi_info("apple-dcpext1: dcp@315c00000 wired to usb-pd@3b, %d firmware carveouts from ADT\n", n);
++		snprintf(msg, sizeof(msg), "applied: %d carveouts", n);
++	}
++	chosen = fdt_path_offset(fdt, "/chosen");
++	if (chosen >= 0)
++		fdt_setprop_string(fdt, chosen, STATUS_PROP, msg);
++}
+diff --git a/drivers/firmware/efi/libstub/efistub.h b/drivers/firmware/efi/libstub/efistub.h
+index fd91fc15e..d85a1604f 100644
+--- a/drivers/firmware/efi/libstub/efistub.h
++++ b/drivers/firmware/efi/libstub/efistub.h
+@@ -1106,6 +1106,12 @@ efi_status_t efi_low_alloc_above(unsigned long size, unsigned long align,
+ 
+ efi_status_t efi_parse_options(char const *cmdline);
+ 
++#if defined(CONFIG_ARM64) && defined(CONFIG_ARCH_APPLE)
++void efi_apple_dcpext1_fixup(void *fdt, const char *cmdline);
++#else
++static inline void efi_apple_dcpext1_fixup(void *fdt, const char *cmdline) { }
++#endif
++
+ void efi_parse_option_graphics(char *option);
+ 
+ efi_status_t efi_setup_graphics(struct screen_info *si, struct edid_info *edid);
+diff --git a/drivers/firmware/efi/libstub/fdt.c b/drivers/firmware/efi/libstub/fdt.c
+index 23b3543d3..63d5a17c3 100644
+--- a/drivers/firmware/efi/libstub/fdt.c
++++ b/drivers/firmware/efi/libstub/fdt.c
+@@ -67,6 +67,9 @@ static efi_status_t update_fdt(void *orig_fdt, unsigned long orig_fdt_size,
+ 	if (status != 0)
+ 		goto fdt_set_fail;
+ 
++	if (IS_ENABLED(CONFIG_ARM64) && IS_ENABLED(CONFIG_ARCH_APPLE))
++		efi_apple_dcpext1_fixup(fdt, cmdline_ptr);
++
+ 	/*
+ 	 * Delete all memory reserve map entries. When booting via UEFI,
+ 	 * kernel will use the UEFI memory map to find reserved regions.
+-- 
+2.55.0
+
