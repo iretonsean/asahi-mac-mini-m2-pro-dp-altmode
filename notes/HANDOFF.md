@@ -153,9 +153,17 @@ About 60 MB lands on /boot (952 MB free).
 
 ## Result 2026-10-15
 
-First boot of the fairydust entry: **USB-C video works.** Stub `applied: 3 carveouts, mux-index 2`,
+**USB-C video works.** Kernel = fairydust + patches 0001-0005 (0003 shared carveout, 0004 hotplug
+fixes, 0005 boot HPD replay; commits 4e6ac49, 1570d7d). Stub `applied: 3 carveouts, mux-index 2`,
 `dcp@315c00000` bound, `card2-DP-1` connected, Hyprland shows DP-1 at 1920x1080@240.
-verify.sh: 15 PASS, 5 FAIL. The FAILs: HDMI not connected (no HDMI monitor on at test time),
+verify.sh: 15 PASS, 5 FAIL. The FAILs: HDMI not connected (no HDMI monitor at test time) and
 success checks 3/4/4b/5 (typec_displayport module, svid ff01 altmode on 0x3b, VIA billboard gone).
-Those checks look at the Type-C altmode software path; the image works without it. Not yet tested:
-hot-plug (if dark after a late plug-in, port Aurora `dff2d7cb`, see AURORA-REVIEW.md), HDMI + USB-C together, suspend.
+Those 4 checks look at the Type-C altmode software path; the image works without it.
+
+**Boot selection (scripts/dp-test.sh, scripts/grub-05_asahi_dp_oneshot):** installed and ON
+(`/boot/grub/fairydust.env`: `fd_default=1`). GRUB boots fairydust every time; `GRUB_DEFAULT=0` is
+unchanged. Guard: GRUB sets `fd_tries=1` before a fairydust boot, `/usr/local/sbin/asahi-dp-watchdog`
+clears it when the network is up. If GRUB finds `fd_tries=1`, it sets `fd_default=0` and boots stock.
+`sudo scripts/dp-test.sh default off` returns to stock-by-default; `status` shows the flags.
+
+Not yet tested: HDMI + USB-C together, suspend/resume.

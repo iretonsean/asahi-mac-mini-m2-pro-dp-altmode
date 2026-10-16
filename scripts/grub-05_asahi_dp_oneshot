@@ -1,0 +1,30 @@
+#!/bin/sh
+# asahi-dp-altmode: choose the fairydust entry from /boot/grub/fairydust.env (scripts/dp-test.sh).
+#   fd_next=1     boot fairydust ONCE (cleared before boot).
+#   fd_default=1  boot fairydust every time, guarded by fd_tries: GRUB sets fd_tries=1 before it
+#                 boots fairydust; asahi-dp-watchdog clears it once the network is up. If GRUB finds
+#                 fd_tries=1 (last fairydust boot hung, crashed or lost the network), it sets
+#                 fd_default=0 and boots the stock default. GRUB_DEFAULT=0 is not changed.
+cat <<'G'
+search --no-floppy --fs-uuid --set=fd_esp <boot-fs-uuid>
+if [ -n "$fd_esp" ]; then
+  if [ -f ($fd_esp)/grub/fairydust.env ]; then
+    load_env -f ($fd_esp)/grub/fairydust.env fd_next fd_default fd_tries
+    if [ "$fd_next" = "1" ]; then
+      set fd_next=0
+      save_env -f ($fd_esp)/grub/fairydust.env fd_next
+      set default="gnulinux-fairydust-dp-usbpd3b"
+      set timeout=1
+    elif [ "$fd_default" = "1" ]; then
+      if [ "$fd_tries" = "1" ]; then
+        set fd_default=0
+        save_env -f ($fd_esp)/grub/fairydust.env fd_default
+      else
+        set fd_tries=1
+        save_env -f ($fd_esp)/grub/fairydust.env fd_tries
+        set default="gnulinux-fairydust-dp-usbpd3b"
+      fi
+    fi
+  fi
+fi
+G
