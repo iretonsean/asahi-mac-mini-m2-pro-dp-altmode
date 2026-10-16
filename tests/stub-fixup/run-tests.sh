@@ -28,7 +28,7 @@ echo "base: $BASE  adt region: $ADT_SZ bytes  dcpext0 (from m1n1): $D0"
 
 python3 mkadt.py "$T/good.adt" "$ADT_SZ" --dcpext0 "$D0" --dcpext1 "$D1" --junk
 "$H" "$BASE" "$T/good.adt" "$OPT" "$T/good.dtb" >"$T/log"
-desc="happy path: status 'applied: 2 carveouts' ($(status "$T/good.dtb"))"; t test "$(status "$T/good.dtb")" = "applied: 2 carveouts"
+desc="happy path: status 'applied: 2 carveouts' ($(status "$T/good.dtb"))"; t test "$(status "$T/good.dtb")" = "applied: 2 carveouts, mux-index 2"
 # independent implementation: gen-dtb.sh with the same segments on the same base
 printf '0x%s 0x%s 0x%s\n' $(echo "$D1" | tr ',:' '  ') > "$T/segs"
 "$ROOT/scripts/gen-dtb.sh" --live-dtb "$BASE" --segments "$T/segs" -o "$T/gen.dtb" >/dev/null
@@ -55,6 +55,15 @@ ov=$(echo "$D0" | cut -d, -f1 | cut -d: -f1)
 python3 mkadt.py "$T/x.adt" "$ADT_SZ" --dcpext0 "$D0" --dcpext1 "$ov:140000000:4000"
 "$H" "$BASE" "$T/x.adt" "$OPT" "$T/o.dtb" >/dev/null
 desc="dcpext1 segment overlapping dcpext0 carveout -> refused ($(status "$T/o.dtb"))"; t eval 'same_as_base "$T/o.dtb" && status "$T/o.dtb" | grep -q overlaps'
+# a segment m1n1 would share with dcpext0 (same phys and size, e.g. the firmware text) reuses m1n1's node
+sh=$(echo "$D0" | cut -d, -f1); shp=${sh%%:*}; shs=${sh##*:}
+python3 mkadt.py "$T/x.adt" "$ADT_SZ" --dcpext0 "$D0" --dcpext1 "$shp:10040000000:$shs,${D1#*,}"
+"$H" "$BASE" "$T/x.adt" "$OPT" "$T/sh.dtb" >/dev/null
+desc="dcpext1 segment shared with dcpext0 (exact) -> applied ($(status "$T/sh.dtb"))"; t test "$(status "$T/sh.dtb")" = "applied: 2 carveouts, mux-index 2"
+shn=/reserved-memory/asc-firmware@$shp
+desc="shared node keeps dcpext0's entry and gains dcpext1's (2 iommu-addresses entries)"; t eval '[ "$(fdtget -t x "$T/sh.dtb" $shn iommu-addresses | wc -w)" = 10 ] && [ "$(fdtget -t x "$T/sh.dtb" $shn iommu-addresses | cut -d" " -f1-5)" = "$(fdtget -t x "$BASE" $shn iommu-addresses)" ]'
+desc="shared node: no duplicate node, dcp@315c00000 memory-region points at it"; t eval '[ "$(fdtget -l "$T/sh.dtb" /reserved-memory | grep -c "^asc-firmware@$shp$")" = 1 ] && fdtget -t x "$T/sh.dtb" /soc/dcp@315c00000 memory-region | grep -qw "$(fdtget -t x "$BASE" $shn phandle)"'
+desc="shared node reg unchanged"; t test "$(fdtget -t x "$T/sh.dtb" $shn reg)" = "$(fdtget -t x "$BASE" $shn reg)"
 "$H" "$BASE" - "$OPT" "$T/o.dtb" >/dev/null
 desc="ADT region unmapped -> refused ($(status "$T/o.dtb"))"; t eval 'same_as_base "$T/o.dtb" && status "$T/o.dtb" | grep -q "does not parse"'
 "$H" "$T/good.dtb" "$T/good.adt" "$OPT" "$T/o.dtb" >/dev/null

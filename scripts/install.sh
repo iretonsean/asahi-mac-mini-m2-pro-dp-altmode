@@ -24,7 +24,7 @@ KVER=${KVER:-7.1.13-fairydust-dp}
 STAGE=${STAGE:-$HERE/staging}                       # make modules_install INSTALL_MOD_PATH=staging INSTALL_MOD_STRIP=1
 MODSRC=$STAGE/lib/modules; [ -d "$MODSRC" ] || MODSRC=$STAGE/usr/lib/modules   # no /lib->/usr/lib symlink in a staging dir
 IMAGE=${IMAGE:-$HERE/linux/arch/arm64/boot/Image}
-DCP_OPT="apple_dcpext1=usb-pd@3b"                   # opt-in switch read by the EFI stub fixup
+DCP_OPT="apple_dcpext1=usb-pd@3b"; [ -r $HERE/test.cmdline ] && DCP_EXTRA=$(head -c 200 $HERE/test.cmdline | tr -cd "a-z0-9_=+ ")                   # opt-in switch read by the EFI stub fixup
 INITRAMFS_PREBUILT=${INITRAMFS_PREBUILT:-$HERE/build/initramfs-linux-fairydust.img}   # optional
 # Kept OUT of /boot/vmlinuz-* on purpose: grub-mkconfig's 10_linux globs /boot/vmlinuz-*,
 # /boot/vmlinux-*, /boot/kernel-*, /boot/Image and makes the version_sort-highest one the
@@ -54,7 +54,7 @@ menuentry 'Arch Linux, fairydust DP alt mode ($KVER, USB-C Back Right Middle / u
 	insmod fat
 	search --no-floppy --fs-uuid --set=root $bootuuid
 	echo	'Loading Linux $KVER (EFI stub enables dcpext1 -> usb-pd@3b) ...'
-	linux	$G_VMLINUZ $cmdline $DCP_OPT
+	linux	$G_VMLINUZ $cmdline $DCP_OPT ${DCP_EXTRA:-}
 	echo	'Loading initial ramdisk ...'
 	initrd	$G_INITRD
 }
