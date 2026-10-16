@@ -150,3 +150,12 @@ About 60 MB lands on /boot (952 MB free).
   (it blesses the keyboard port).
 - `dtbs_install` into `/usr/lib/modules/<kver>/dtbs/` is deliberately not done (the
   `95-m1n1-install.hook` pacman hook watches that layout).
+
+## Result 2026-10-15
+
+First boot of the fairydust entry: **USB-C video works.** Stub `applied: 3 carveouts, mux-index 2`,
+`dcp@315c00000` bound, `card2-DP-1` connected, Hyprland shows DP-1 at 1920x1080@240.
+verify.sh: 15 PASS, 5 FAIL. The FAILs: HDMI not connected (no HDMI monitor on at test time),
+success checks 3/4/4b/5 (typec_displayport module, svid ff01 altmode on 0x3b, VIA billboard gone).
+Those checks look at the Type-C altmode software path; the image works without it. Not yet tested:
+hot-plug (if dark after a late plug-in, port Aurora `dff2d7cb`, see AURORA-REVIEW.md), HDMI + USB-C together, suspend.
