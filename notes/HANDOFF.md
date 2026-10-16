@@ -174,4 +174,4 @@ dcpext1 (now USB-C Back Right Middle). `dcp@389c00000` is the internal-panel DCP
 no dispext power domains), not a third dcpext. So a second USB-C display is not possible with the
 current drivers; use the HDMI port for the second monitor.
 
-Not yet tested: HDMI + USB-C together, suspend/resume.
+HDMI + USB-C together: works (2026-10-15; ASUS VX248 on HDMI at 1080p60 left, Acer on USB-C at 1080p240 right; layout in ~/.config/hypr/monitors.lua, matched by monitor description). Not yet tested: suspend/resume.
