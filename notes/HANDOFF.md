@@ -163,7 +163,15 @@ Those 4 checks look at the Type-C altmode software path; the image works without
 **Boot selection (scripts/dp-test.sh, scripts/grub-05_asahi_dp_oneshot):** installed and ON
 (`/boot/grub/fairydust.env`: `fd_default=1`). GRUB boots fairydust every time; `GRUB_DEFAULT=0` is
 unchanged. Guard: GRUB sets `fd_tries=1` before a fairydust boot, `/usr/local/sbin/asahi-dp-watchdog`
-clears it when the network is up. If GRUB finds `fd_tries=1`, it sets `fd_default=0` and boots stock.
+clears it once the wired network driver is up (`end0` exists, so kernel and modules match) or the
+gateway answers; a router outage alone is not a failed boot. If GRUB finds `fd_tries=1`, it sets
+`fd_default=0` and boots stock. The watchdog source is `scripts/asahi-dp-watchdog`;
+`sudo scripts/dp-test.sh setup-default` installs it and the GRUB snippet.
 `sudo scripts/dp-test.sh default off` returns to stock-by-default; `status` shows the flags.
+
+**Second display:** t6020 has two external display controllers: dcpext0 (HDMI port, lpdptx) and
+dcpext1 (now USB-C Back Right Middle). `dcp@389c00000` is the internal-panel DCP (`apple,t6020-dcp`,
+no dispext power domains), not a third dcpext. So a second USB-C display is not possible with the
+current drivers; use the HDMI port for the second monitor.
 
 Not yet tested: HDMI + USB-C together, suspend/resume.

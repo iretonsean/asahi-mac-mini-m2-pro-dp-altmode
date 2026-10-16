@@ -27,9 +27,8 @@ case "${1:-}" in
     esac; grub-editenv $ENV list ;;
   setup-default)
     install -m 755 "$HERE/scripts/grub-05_asahi_dp_oneshot" /etc/grub.d/05_asahi_dp_oneshot
-    W=/usr/local/sbin/asahi-dp-watchdog
-    grep -q fd_tries $W || sed -i "s|{ echo \"network ok\" >> \"\$out\"; exit 0; }|{ echo \"network ok\" >> \"\$out\"; grub-editenv $ENV set fd_tries=0; exit 0; }|" $W
-    grep -n fd_tries $W
+    install -m 755 "$HERE/scripts/asahi-dp-watchdog" /usr/local/sbin/asahi-dp-watchdog
+    grep -n fd_tries /usr/local/sbin/asahi-dp-watchdog
     grub-mkconfig -o /boot/grub/grub.cfg 2>&1 | tail -1
     grep -c fd_tries /boot/grub/grub.cfg ;;
   status) grub-editenv $ENV list; cat /var/log/asahi-dp/latest.txt 2>/dev/null | tail -40 ;;
