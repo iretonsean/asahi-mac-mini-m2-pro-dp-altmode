@@ -1,0 +1,175 @@
+From 751a20f87203c44cd0f7bda95abcf4b0e9364109 Mon Sep 17 00:00:00 2001
+From: Sean Ireton <1441621+iretonsean@users.noreply.github.com>
+Date: Thu, 15 Oct 2026 21:34:55 -0700
+Subject: [PATCH 5/5] DP alt mode: replay boot-time HPD, mux-index boot option,
+ PHY mode logging
+
+- tipd/cd321x: a display attached at power-on asserts HPD before the DCP
+  registers its connector; send the oob hotplug event once more 15 s later.
+- efi/libstub apple-dcpext: apple_dcpext1_mux=N overrides MUX_INDEX (2 is
+  correct on j474s; 3 breaks AUX).
+- phy/apple/atc: log every mode change.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/firmware/efi/libstub/apple-dcpext.c | 24 +++++++++++++--
+ drivers/phy/apple/atc.c                     |  3 ++
+ drivers/usb/typec/tipd/core.c               | 33 ++++++++++++++++++++-
+ drivers/usb/typec/tipd/tps6598x.h           |  2 ++
+ 4 files changed, 59 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/firmware/efi/libstub/apple-dcpext.c b/drivers/firmware/efi/libstub/apple-dcpext.c
+index 3781acf5e..441c904f7 100644
+--- a/drivers/firmware/efi/libstub/apple-dcpext.c
++++ b/drivers/firmware/efi/libstub/apple-dcpext.c
+@@ -258,6 +258,24 @@ static int set_cells(void *fdt, const char *path, const char *prop, const u32 *c
+ 	return fdt_setprop(fdt, off, prop, buf, n * sizeof(fdt32_t));
+ }
+ 
++/* "apple_dcpext1_mux=N" (0-8) overrides MUX_INDEX for crossbar experiments; -1 if absent */
++static int cmdline_mux_override(const char *cmdline)
++{
++	static const char opt[] = "apple_dcpext1_mux=";
++	const char *p = cmdline;
++	size_t l = sizeof(opt) - 1;
++
++	while (p && (p = strstr(p, opt))) {
++		if ((p == cmdline || p[-1] == ' ') && p[l] >= '0' && p[l] <= '8' &&
++		    (p[l + 1] == '\0' || p[l + 1] == ' '))
++			return p[l] - '0';
++		p += l;
++	}
++	return -1;
++}
++
++static int mux_index = MUX_INDEX;
++
+ static bool cmdline_has_opt(const char *cmdline)
+ {
+ 	const char *p = cmdline;
+@@ -481,7 +499,7 @@ static const char *dcpext1_check_and_apply(void *fdt, int *nsegs)
+ 		u32 iommus[4] = { d0_ph, 0, d1_ph, 0 };
+ 		u32 phys[2] = { phy_ph, PHY_TYPE_DP };
+ 		u32 mux[2] = { xbar_ph, 0 };
+-		u32 dptx = DPTX_PHY_INDEX, muxi = MUX_INDEX;
++		u32 dptx = DPTX_PHY_INDEX, muxi = mux_index;
+ 		const void *fv;
+ 
+ 		err |= set_str(fdt, DISPEXT1_DART, "status", "okay");
+@@ -523,13 +541,15 @@ void efi_apple_dcpext1_fixup(void *fdt, const char *cmdline)
+ 	if (!cmdline || !cmdline_has_opt(cmdline))
+ 		return;
+ 
++	if (cmdline_mux_override(cmdline) >= 0)
++		mux_index = cmdline_mux_override(cmdline);
+ 	why = dcpext1_check_and_apply(fdt, &n);
+ 	if (why) {
+ 		efi_err("apple-dcpext1: %s\n", why);
+ 		snprintf(msg, sizeof(msg), "%s", why);
+ 	} else {
+ 		efi_info("apple-dcpext1: dcp@315c00000 wired to usb-pd@3b, %d firmware carveouts from ADT\n", n);
+-		snprintf(msg, sizeof(msg), "applied: %d carveouts", n);
++		snprintf(msg, sizeof(msg), "applied: %d carveouts, mux-index %d", n, mux_index);
+ 	}
+ 	chosen = fdt_path_offset(fdt, "/chosen");
+ 	if (chosen >= 0)
+diff --git a/drivers/phy/apple/atc.c b/drivers/phy/apple/atc.c
+index dec0c3dbf..d70d94130 100644
+--- a/drivers/phy/apple/atc.c
++++ b/drivers/phy/apple/atc.c
+@@ -1870,6 +1870,9 @@ static int atcphy_configure(struct apple_atcphy *atcphy, enum atcphy_mode mode)
+ 
+ 	lockdep_assert_held(&atcphy->lock);
+ 
++	dev_info(atcphy->dev, "configure mode %d -> %d (swap_lanes %d, pipehandler_up %d)\n",
++		 atcphy->mode, mode, atcphy->swap_lanes, atcphy->pipehandler_up);
++
+ 	if (mode == APPLE_ATCPHY_MODE_OFF) {
+ 		ret = atcphy_power_off(atcphy);
+ 		atcphy->mode = mode;
+diff --git a/drivers/usb/typec/tipd/core.c b/drivers/usb/typec/tipd/core.c
+index 5c61b7370..ee52de772 100644
+--- a/drivers/usb/typec/tipd/core.c
++++ b/drivers/usb/typec/tipd/core.c
+@@ -98,6 +98,7 @@ struct tps6598x_rx_identity_reg {
+ 
+ /* Debounce delay for mode changes, in milliseconds */
+ #define CD321X_DEBOUNCE_DELAY_MS 500
++#define CD321X_HPD_REPLAY_DELAY_MS 15000
+ 
+ enum {
+ 	TPS_MODE_APP,
+@@ -745,12 +746,40 @@ static void cd321x_update_work(struct work_struct *work)
+ 	/* Launch the USB role switch */
+ 	usb_role_switch_set_role(tps->role_sw, new_role);
+ 
+-	if (cd321x->connector_fwnode && dp_hpd)
++	if (cd321x->connector_fwnode && dp_hpd) {
+ 		drm_connector_oob_hotplug_event(cd321x->connector_fwnode, connector_status_connected);
++		if (!cd321x->hpd_replayed) {
++			cd321x->hpd_replayed = true;
++			schedule_delayed_work(&cd321x->hpd_replay_work,
++					      msecs_to_jiffies(CD321X_HPD_REPLAY_DELAY_MS));
++		}
++	}
+ 
+ 	power_supply_changed(tps->psy);
+ }
+ 
++/*
++ * A display attached at power-on reaches DP alt mode and asserts HPD while the PHY
++ * driver probes, before the DCP has registered its DRM connector, so the
++ * oob hotplug event is dropped and the display stays dark until a replug.
++ * Send it once more after the DCP is up.
++ */
++
++static void cd321x_hpd_replay_work(struct work_struct *work)
++{
++	struct cd321x *cd321x = container_of(to_delayed_work(work),
++					    struct cd321x, hpd_replay_work);
++	struct tps6598x *tps = &cd321x->tps;
++
++	guard(mutex)(&tps->lock);
++
++	if (tps->partner && (tps->data_status & CD321X_DATA_STATUS_HPD_LEVEL)) {
++		dev_info(tps->dev, "replaying DP HPD for a display attached at boot\n");
++		drm_connector_oob_hotplug_event(cd321x->connector_fwnode,
++						connector_status_connected);
++	}
++}
++
+ static void cd321x_queue_status(struct cd321x *cd321x)
+ {
+ 	cd321x->update_status.status_changed |= cd321x->update_status.status ^ cd321x->tps.status;
+@@ -1187,6 +1216,7 @@ cd321x_register_port(struct tps6598x *tps, struct fwnode_handle *fwnode)
+ 	int ret;
+ 
+ 	INIT_DELAYED_WORK(&cd321x->update_work, cd321x_update_work);
++	INIT_DELAYED_WORK(&cd321x->hpd_replay_work, cd321x_hpd_replay_work);
+ 
+ 	ret = tps6598x_register_port(tps, fwnode);
+ 	if (ret)
+@@ -1655,6 +1685,7 @@ static void cd321x_remove(struct tps6598x *tps)
+ 	struct cd321x *cd321x = container_of(tps, struct cd321x, tps);
+ 
+ 	cancel_delayed_work_sync(&cd321x->update_work);
++	cancel_delayed_work_sync(&cd321x->hpd_replay_work);
+ }
+ 
+ int tipd_init(struct tps6598x *tps)
+diff --git a/drivers/usb/typec/tipd/tps6598x.h b/drivers/usb/typec/tipd/tps6598x.h
+index 16e8dc0b1..7832150cd 100644
+--- a/drivers/usb/typec/tipd/tps6598x.h
++++ b/drivers/usb/typec/tipd/tps6598x.h
+@@ -372,6 +372,8 @@ struct cd321x {
+ 
+ 	struct cd321x_status update_status;
+ 	struct delayed_work update_work;
++	struct delayed_work hpd_replay_work;
++	bool hpd_replayed;
+ 	struct usb_pd_identity cur_partner_identity;
+ 
+ 	struct fwnode_handle *connector_fwnode;
+-- 
+2.55.0
+

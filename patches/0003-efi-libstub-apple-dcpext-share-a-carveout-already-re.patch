@@ -1,0 +1,80 @@
+From 705472a519d0e77d81b15fd7a24b881b66327e3a Mon Sep 17 00:00:00 2001
+From: Sean Ireton <1441621+iretonsean@users.noreply.github.com>
+Date: Thu, 15 Oct 2026 20:35:05 -0700
+Subject: [PATCH 3/5] efi/libstub: apple-dcpext: share a carveout already
+ reserved for another DCP
+
+m1n1 reserves a firmware segment shared by several DCPs once and adds each
+DCP to that node (dt_get_or_add_reserved_mem). Do the same for dcpext1
+instead of refusing on an exact match; a partial overlap still refuses.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/firmware/efi/libstub/apple-dcpext.c | 37 ++++++++++++++++++++-
+ 1 file changed, 36 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/firmware/efi/libstub/apple-dcpext.c b/drivers/firmware/efi/libstub/apple-dcpext.c
+index 8e3858577..3781acf5e 100644
+--- a/drivers/firmware/efi/libstub/apple-dcpext.c
++++ b/drivers/firmware/efi/libstub/apple-dcpext.c
+@@ -322,6 +322,29 @@ static bool m1n1_emitted(void *fdt, const struct seg *seg, u32 dcp_ph, const cha
+ 
+ /* ---- the fixup ---- */
+ 
++/*
++ * m1n1 names each segment node asc-firmware@<phys> and reuses an existing node of that name
++ * (dt_get_or_add_reserved_mem), so a segment shared with another DCP, e.g. the firmware text,
++ * gets one node with one iommu-addresses entry per DCP. Return that node if @seg is exactly
++ * such a shared segment (same name, compatible, phys and size), else -1.
++ */
++static int shared_asc_node(void *fdt, const struct seg *seg)
++{
++	char path[64];
++	const fdt32_t *v;
++	int node, len;
++
++	snprintf(path, sizeof(path), "%s/asc-firmware@%llx", RESV, seg->phys);
++	node = fdt_path_offset(fdt, path);
++	if (node < 0 || fdt_node_check_compatible(fdt, node, "apple,asc-mem") ||
++	    !fdt_get_phandle(fdt, node))
++		return -1;
++	v = fdt_getprop(fdt, node, "reg", &len);
++	if (!v || len != 16 || fdt_u64_at(v) != seg->phys || fdt_u64_at(v + 2) != seg->size)
++		return -1;
++	return node;
++}
++
+ static const char *dcpext1_check_and_apply(void *fdt, int *nsegs)
+ {
+ 	struct seg s0[MAX_SEGS], s1[MAX_SEGS];
+@@ -411,7 +434,7 @@ static const char *dcpext1_check_and_apply(void *fdt, int *nsegs)
+ 	if (n1 < 1)
+ 		return "failed: ADT has no dcpext1 segment-ranges";
+ 	for (i = 0; i < n1; i++) {
+-		if (!resv_disjoint(fdt, s1[i].phys, s1[i].size))
++		if (shared_asc_node(fdt, &s1[i]) < 0 && !resv_disjoint(fdt, s1[i].phys, s1[i].size))
+ 			return "failed: a dcpext1 segment overlaps an existing reservation";
+ 		if (!s1[i].remap)
+ 			return "failed: dcpext1 segment without remap iova";
+@@ -427,6 +450,18 @@ static const char *dcpext1_check_and_apply(void *fdt, int *nsegs)
+ 		u32 iommu[5] = { dcp_ph, s1[i].remap >> 32, (u32)s1[i].remap,
+ 				 s1[i].size >> 32, (u32)s1[i].size };
+ 
++		off = shared_asc_node(fdt, &s1[i]);
++		if (off >= 0) {
++			/* shared with another DCP: add dcpext1 to m1n1's node, as m1n1 would */
++			fdt32_t be[5];
++			int j;
++
++			for (j = 0; j < 5; j++)
++				be[j] = cpu_to_fdt32(iommu[j]);
++			err |= fdt_appendprop(fdt, off, "iommu-addresses", be, sizeof(be));
++			regions[i] = fdt_get_phandle(fdt, off);
++			continue;
++		}
+ 		snprintf(path, sizeof(path), "asc-firmware@%llx", s1[i].phys);
+ 		off = fdt_add_subnode(fdt, fdt_path_offset(fdt, RESV), path);
+ 		if (off < 0) {
+-- 
+2.55.0
+
