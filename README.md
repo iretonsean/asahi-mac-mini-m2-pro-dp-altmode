@@ -11,13 +11,27 @@ PHYs DisplayPort alt mode would repurpose, so the whole project is organised aro
 bricking it. Read [`BRIEF.md`](BRIEF.md) (the full problem statement, diagnosis and safety
 rules) and [`notes/ROLLBACK.md`](notes/ROLLBACK.md) before doing anything.
 
-## Status (2026-09-25)
+## Status (2026-10-15)
 
-Built, not yet booted. Kernel `7.1.13-fairydust-dp` = fairydust `ce9f2eba72c0` + a DTS patch +
-an EFI-stub patch that enables dcpext1 on top of the device tree m1n1 builds each boot, with the
-firmware carveouts read from the Apple Device Tree m1n1 leaves in RAM. No macOS boot is needed.
-Remaining: `sudo scripts/install.sh`, reboot, pick the fairydust entry, `scripts/verify.sh`
-(see [`notes/HANDOFF.md`](notes/HANDOFF.md)).
+**Works.** A USB-C monitor on "USB-C Back Right Middle" runs as `DP-1` (tested at 1080p, 240 Hz), also together
+with HDMI. Kernel `7.1.13-fairydust-dp` = fairydust `ce9f2eba72c0` + `patches/0001`-`0005`. It is the default boot
+through `/boot/grub/fairydust.env`, with an automatic fall back to the stock kernel if a fairydust boot fails
+(`scripts/dp-test.sh`). Not tested yet: suspend.
+
+## Use it on your own Mac mini
+
+- **Same machine only:** Mac mini M2 Pro (`apple,j474s`, `t6020`). The plain M2 Mac mini (`j473`) and other Macs
+  have other ports and controllers; the patches will not apply as they are.
+- **Your disks are different.** Disk and partition IDs in the notes are written as `<root-fs-uuid>`,
+  `<luks-uuid>`, `<boot-fs-uuid>`, `<esp-partuuid>` and `<boot-partuuid>`. Find yours with `lsblk -f` and
+  `blkid`. The scripts read them at run time; `scripts/dp-test.sh setup-default` fills in the `/boot` UUID, your
+  user name and the repo path when it installs the GRUB script and the watchdog.
+- **Read [`notes/ROLLBACK.md`](notes/ROLLBACK.md) first** and keep a way back to the stock kernel. Never write the
+  internal NVMe or run `update-m1n1`.
+- Steps: build with `scripts/kbuild.sh` (fairydust + `patches/`), `scripts/stage.sh`, `sudo scripts/install.sh`,
+  reboot into the fairydust entry, `scripts/verify.sh`. Then, if it works, `sudo scripts/dp-test.sh setup-default`
+  and `sudo scripts/dp-test.sh default on`.
+- No warranty: this changes how your Mac boots. Issues and fixes are welcome.
 
 ## Things worth knowing even if you have different hardware
 

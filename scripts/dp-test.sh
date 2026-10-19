@@ -26,8 +26,11 @@ case "${1:-}" in
       *) echo "default on|off"; exit 1 ;;
     esac; grub-editenv $ENV list ;;
   setup-default)
-    install -m 755 "$HERE/scripts/grub-05_asahi_dp_oneshot" /etc/grub.d/05_asahi_dp_oneshot
-    install -m 755 "$HERE/scripts/asahi-dp-watchdog" /usr/local/sbin/asahi-dp-watchdog
+    # Fill in this machine's values: the /boot filesystem UUID, and the owner and path of this repo.
+    sed "s/@BOOT_FS_UUID@/$(findmnt -no UUID /boot)/" "$HERE/scripts/grub-05_asahi_dp_oneshot" > /etc/grub.d/05_asahi_dp_oneshot
+    chmod 755 /etc/grub.d/05_asahi_dp_oneshot
+    sed -e "s#@OWNER@#$(stat -c %U "$HERE")#" -e "s#@REPO@#$HERE#" "$HERE/scripts/asahi-dp-watchdog" > /usr/local/sbin/asahi-dp-watchdog
+    chmod 755 /usr/local/sbin/asahi-dp-watchdog
     grep -n fd_tries /usr/local/sbin/asahi-dp-watchdog
     grub-mkconfig -o /boot/grub/grub.cfg 2>&1 | tail -1
     grep -c fd_tries /boot/grub/grub.cfg ;;

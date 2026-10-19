@@ -8,7 +8,8 @@ out=/var/log/asahi-dp/test-$(date +%F-%H%M%S).txt; mkdir -p /var/log/asahi-dp
 sleep 90
 {
   echo "== $(uname -r)  fixup: $(tr -d '\0' < /proc/device-tree/chosen/asahi-dp-altmode,dcpext1 2>/dev/null)"
-  sudo -u "$USER_NAME" /home/USER/Projects/asahi-dp-altmode/scripts/verify.sh 2>&1
+  # The user and repo path below are filled in by "dp-test.sh setup-default".
+  sudo -u @OWNER@ @REPO@/scripts/verify.sh 2>&1
   echo "== dmesg"
   dmesg | grep -iE '315c00000|dispext1|dpxbar|dptx|cd321x|typec|altmode|BTF|apple-dcpext1' | grep -v 'Max chain'
   echo "== drm"; for c in /sys/class/drm/card*-*; do echo "$(basename $c) $(cat $c/status 2>/dev/null)"; done

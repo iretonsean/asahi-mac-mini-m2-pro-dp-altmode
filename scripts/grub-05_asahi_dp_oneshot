@@ -5,8 +5,9 @@
 #                 boots fairydust; asahi-dp-watchdog clears it once the network is up. If GRUB finds
 #                 fd_tries=1 (last fairydust boot hung, crashed or lost the network), it sets
 #                 fd_default=0 and boots the stock default. GRUB_DEFAULT=0 is not changed.
+# The fd_esp search UUID (the filesystem UUID of /boot) is filled in by "dp-test.sh setup-default".
 cat <<'G'
-search --no-floppy --fs-uuid --set=fd_esp <boot-fs-uuid>
+search --no-floppy --fs-uuid --set=fd_esp @BOOT_FS_UUID@
 if [ -n "$fd_esp" ]; then
   if [ -f ($fd_esp)/grub/fairydust.env ]; then
     load_env -f ($fd_esp)/grub/fairydust.env fd_next fd_default fd_tries
